@@ -1,0 +1,5 @@
+lyft_distributed>=1.0.0
+pandas>=2.0.0
+pyarrow>=14.0.1  # For parquet support
+fugue>=0.8.6  # Often required by lyft_distributed
+pyspark>=3.5.0  # Specify latest stable version 
