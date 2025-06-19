@@ -14,7 +14,7 @@ hp = {
     row['name']: row['default_value']
     for row in RELEVANCE_MODEL_LLS_HYPERPARAMETERS
 } 
-hp['s3_dir'] += 'vduzhik/test_v6'
+hp['s3_dir'] += 'jnogas/test_v6'
 hp['in_notebook'] = True
 hp['total_rows_limit'] = 1_000_000
 
@@ -27,6 +27,6 @@ hp.update({
 
 model = Model(hp)
 print()
-#clf = model.train()
+clf = model.train()
 
 #/home/sagemaker-user/studio/src/offeringsmxmodels/models/main/relevance/queries/finished_rides_with_scores_v6.sql

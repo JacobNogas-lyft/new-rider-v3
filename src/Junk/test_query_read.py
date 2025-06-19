@@ -30,4 +30,5 @@ if __name__ == "__main__":
         sql_query = f.read()
 
     #query_path='/home/sagemaker-user/studio/src/offeringsmxmodels/models/main/relevance/queries/finished_rides_with_scores_v6.sql'
-    query(sql_query).hive_to_file(S3_PATH, {'cluster': CLUSTER})
+    df=query(sql_query).hive_to_file(S3_PATH, {'cluster': CLUSTER}, to_pandas=True)
+    print()
