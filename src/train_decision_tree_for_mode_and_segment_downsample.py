@@ -7,8 +7,10 @@ import matplotlib.pyplot as plt
 from load_data import load_parquet_data
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import joblib
 
+# Configuration parameters
+SEGMENT_TYPE = 'airport'  # Options: 'airport', 'churned', 'all'
+MAX_DEPTH = 5
 
 # Original categorical features (commented out for reference)
 # key_categorical_cols = ['region', 'currency', 'passenger_device', 'pax_os', 'pax_carrier']
@@ -95,42 +97,8 @@ def filter_by_segment(df, segment_type):
     
     return filtered_df
 
-def load_and_prepare_data(segment_type='all'):
-    print(f"Loading and preparing data for segment: {segment_type}...")
-    df = load_parquet_data()
-    df = add_churned_indicator(df)
-    
-    # Filter by segment
-    df = filter_by_segment(df, segment_type)
-    
-    required_cols = ['requested_ride_type', 'preselected_mode']
-    df = df.dropna(subset=required_cols)
-    return df
-
 def prepare_features_and_target(df, mode):
     df['target_diff_mode'] = ((df['requested_ride_type'] != df['preselected_mode']) & (df['requested_ride_type'] == mode)).astype(int)
-    
-    # Add percentage features for lifetime rides
-    print("Creating percentage features for lifetime rides...")
-    
-    # Handle division by zero by replacing 0 with NaN, then filling with 0
-    df['percent_rides_standard_lifetime'] = (
-        df['rides_standard_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
-    ).fillna(0)
-    
-    df['percent_rides_premium_lifetime'] = (
-        df['rides_premium_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
-    ).fillna(0)
-    
-    df['percent_rides_plus_lifetime'] = (
-        df['rides_plus_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
-    ).fillna(0)
-    
-    print(f"Created percentage features:")
-    print(f"  - percent_rides_standard_lifetime: {df['percent_rides_standard_lifetime'].describe()}")
-    print(f"  - percent_rides_premium_lifetime: {df['percent_rides_premium_lifetime'].describe()}")
-    print(f"  - percent_rides_plus_lifetime: {df['percent_rides_plus_lifetime'].describe()}")
-    
     drop_cols = ['target_diff_mode', 'requested_ride_type', 'preselected_mode']
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
@@ -152,6 +120,69 @@ def prepare_features_and_target(df, mode):
 def split_data(X, y):
     print("Splitting data into train and test sets (stratified)...")
     return train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+def downsample_training_data(X_train, y_train, ratio=2):
+    """
+    Downsample only the training data by randomly sampling from the majority class.
+    
+    Args:
+        X_train (pandas.DataFrame): Training feature matrix
+        y_train (pandas.Series): Training target variable
+        ratio (int): Ratio of majority to minority class (e.g., 2 means 1:2 ratio)
+    
+    Returns:
+        tuple: (X_train_downsampled, y_train_downsampled)
+    """
+    # Set random seed for reproducible sampling
+    np.random.seed(42)
+    
+    print(f"Original training class distribution: {y_train.value_counts().to_dict()}")
+    
+    # Get minority and majority class counts
+    class_counts = y_train.value_counts()
+    minority_class = class_counts.idxmin()
+    majority_class = class_counts.idxmax()
+    
+    minority_count = class_counts[minority_class]
+    majority_count = class_counts[majority_class]
+    
+    # Calculate target majority count based on ratio
+    target_majority_count = minority_count * ratio
+    
+    print(f"Minority class ({minority_class}): {minority_count}")
+    print(f"Majority class ({majority_class}): {majority_count}")
+    print(f"Target majority count for 1:{ratio} ratio: {target_majority_count}")
+    
+    # Get indices for each class
+    minority_indices = y_train[y_train == minority_class].index
+    majority_indices = y_train[y_train == majority_class].index
+    
+    # Randomly sample from majority class
+    if len(majority_indices) > target_majority_count:
+        sampled_majority_indices = np.random.choice(
+            majority_indices, 
+            size=int(target_majority_count), 
+            replace=False
+        )
+    else:
+        # If majority class is smaller than target, use all samples
+        sampled_majority_indices = majority_indices
+        print(f"Warning: Majority class has fewer samples than target. Using all {len(majority_indices)} samples.")
+    
+    # Combine indices
+    downsampled_indices = np.concatenate([minority_indices, sampled_majority_indices])
+    
+    # Shuffle the indices
+    np.random.shuffle(downsampled_indices)
+    
+    # Create downsampled training dataset
+    X_train_downsampled = X_train.loc[downsampled_indices]
+    y_train_downsampled = y_train.loc[downsampled_indices]
+    
+    print(f"Downsampled training class distribution: {y_train_downsampled.value_counts().to_dict()}")
+    print(f"Downsampled training dataset shape: {X_train_downsampled.shape}")
+    
+    return X_train_downsampled, y_train_downsampled
 
 def train_decision_tree(X_train, y_train, max_depth):
     print(f"Training Decision Tree (max_depth={max_depth})...")
@@ -235,14 +266,6 @@ def plot_feature_importance(clf, X, plots_dir):
     plt.savefig(plots_dir / 'feature_importance.pdf')
     print(f"Saved feature importance plot to {plots_dir / 'feature_importance.pdf'}")
 
-def save_model(clf, models_dir):
-    """Save the trained decision tree model and its feature names."""
-    print("Saving model...")
-    models_dir.mkdir(exist_ok=True, parents=True)
-    model_path = models_dir / 'decision_tree_model.joblib'
-    joblib.dump(clf, model_path)
-    print(f"Saved model to {model_path}")
-
 def run_for_mode_and_depth(df, mode, max_depth, segment_type):
     print(f"\n=== Running for segment: {segment_type}, mode: {mode}, max_depth: {max_depth} ===")
     
@@ -251,21 +274,27 @@ def run_for_mode_and_depth(df, mode, max_depth, segment_type):
     if y.nunique() < 2:
         print(f"Skipping segment={segment_type}, mode={mode}, max_depth={max_depth}: only one class present.")
         return
+    
+    # Split data first
     X_train, X_test, y_train, y_test = split_data(X, y)
-    clf = train_decision_tree(X_train, y_train, max_depth)
+    
+    # Downsample only the training data
+    print("Downsampling training data to 1:2 ratio...")
+    X_train_downsampled, y_train_downsampled = downsample_training_data(X_train, y_train, ratio=2)
+    
+    # Train model on downsampled training data
+    clf = train_decision_tree(X_train_downsampled, y_train_downsampled, max_depth)
     class_names = [f'not {mode}', f'{mode} (not preselected)']
     
     # Create directory names - simplified without pruning info
     max_depth_str = str(max_depth) if max_depth is not None else "unbounded"
-    base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
-    plots_dir = base_path / f'plots/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
-    reports_dir = base_path / f'reports/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
-    models_dir = base_path / f'models/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
+    plots_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}_downsample')
+    reports_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}_downsample')
     
+    # Evaluate on original test set (not downsampled)
     evaluate_model(clf, X_test, y_test, class_names, reports_dir)
     visualize_tree(clf, X, class_names, plots_dir, max_depth)
     plot_feature_importance(clf, X, plots_dir)
-    save_model(clf, models_dir)
 
 def main(mode_list, max_depth_list, segment_type_list):
     print(f"Training decision trees for segments: {segment_type_list}")

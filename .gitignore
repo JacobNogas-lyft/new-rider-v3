@@ -65,4 +65,20 @@ wheels/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.db 
+Thumbs.db
+
+# CSV files
+*.csv
+
+# Joblib files
+*.joblib
+
+# SVG and PDF files
+*.svg
+*.pdf
+
+# PNG files
+*.png
+
+# Text files
+*.txt 

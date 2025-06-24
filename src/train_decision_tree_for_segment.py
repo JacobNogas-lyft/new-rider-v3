@@ -8,7 +8,7 @@ from load_data import load_parquet_data
 from pathlib import Path
 
 # Configuration parameters
-MAX_DEPTH = 5
+MAX_DEPTH = 10
 
 # Create plots directory
 PLOTS_DIR = Path('/home/sagemaker-user/studio/src/new-rider-v3/plots')
@@ -82,6 +82,27 @@ def load_and_prepare_data(segment_type='all'):
 
     # Create target: 1 if requested_ride_type != preselected_mode, else 0
     df['target_diff_mode'] = (df['requested_ride_type'] != df['preselected_mode']).astype(int)
+
+    # Add percentage features for lifetime rides
+    print("Creating percentage features for lifetime rides...")
+    
+    # Handle division by zero by replacing 0 with NaN, then filling with 0
+    df['percent_rides_standard_lifetime'] = (
+        df['rides_standard_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    df['percent_rides_premium_lifetime'] = (
+        df['rides_premium_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    df['percent_rides_plus_lifetime'] = (
+        df['rides_plus_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    print(f"Created percentage features:")
+    print(f"  - percent_rides_standard_lifetime: {df['percent_rides_standard_lifetime'].describe()}")
+    print(f"  - percent_rides_premium_lifetime: {df['percent_rides_premium_lifetime'].describe()}")
+    print(f"  - percent_rides_plus_lifetime: {df['percent_rides_plus_lifetime'].describe()}")
 
     # Prepare features: drop target and columns that leak target
     drop_cols = ['target_diff_mode', 'requested_ride_type', 'preselected_mode']
@@ -176,8 +197,8 @@ def main(segment_type='all', max_depth=5):
     class_names = ['requested preselected mode', 'requested non-preselected mode']
     
     # Create subfolders for this segment, max_depth and model type
-    plots_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree/segment_{segment_type}/max_depth_{max_depth}')
-    reports_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree/segment_{segment_type}/max_depth_{max_depth}')
+    plots_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree/all_features/segment_{segment_type}/max_depth_{max_depth}')
+    reports_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree/all_features/segment_{segment_type}/max_depth_{max_depth}')
     
     evaluate_model(clf, X_test, y_test, class_names, reports_dir)
     visualize_tree(clf, X, class_names, plots_dir, max_depth)

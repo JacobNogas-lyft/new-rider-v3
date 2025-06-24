@@ -7,7 +7,7 @@ import seaborn as sns
 import os
 
 def parse_classification_report(file_path):
-    """Parse a classification report file and extract metrics."""
+    """Parse a decision tree classification report file and extract metrics."""
     with open(file_path, 'r') as f:
         content = f.read()
     
@@ -45,26 +45,14 @@ def parse_classification_report(file_path):
     if accuracy_match:
         results['overall_accuracy'] = float(accuracy_match.group(1))
     
-    # Extract probability statistics
-    prob_stats = {}
-    prob_lines = content.split('Prediction probabilities summary:')[-1].strip().split('\n')
-    for line in prob_lines:
-        if ':' in line:
-            key, value = line.split(':', 1)
-            key = key.strip().lower().replace(' ', '_')
-            value = float(value.strip())
-            prob_stats[key] = value
-    
-    results['probability_stats'] = prob_stats
-    
     return results
 
 def analyze_all_reports():
-    """Analyze all classification reports in the reports directory."""
+    """Analyze all decision tree classification reports in the reports directory."""
     all_results = []
     
     # Walk through the reports directory
-    for root, _, files in os.walk('reports'):
+    for root, _, files in os.walk('reports/decision_tree'):
         for file in files:
             if file != 'classification_report.txt':
                 continue
@@ -74,11 +62,11 @@ def analyze_all_reports():
             # Extract segment and mode from path
             path_parts = file_path.split(os.sep)
             
-            # Skip if not an XGBoost report with max_depth_10
-            if 'xg_boost' not in path_parts or 'max_depth_10' not in path_parts:
+            # Only include reports in all_features directory
+            if 'all_features' not in path_parts:
                 continue
             
-            # Extract segment and mode
+            # Extract segment, mode, and depth
             segment = None
             mode = None
             depth = None
@@ -89,9 +77,32 @@ def analyze_all_reports():
                 elif part.startswith('mode_'):
                     mode = part.replace('mode_', '')
                 elif part.startswith('max_depth_'):
-                    depth = part.replace('max_depth_', '')
+                    # Handle complex depth names like "max_depth_15_split50_leaf25_ccp0.0"
+                    depth_part = part.replace('max_depth_', '')
+                    # Extract just the numeric depth part
+                    if '_' in depth_part:
+                        depth = depth_part.split('_')[0]
+                    else:
+                        depth = depth_part
             
+            # Handle the case where there's no explicit segment (mode-based organization)
+            if not segment and mode and depth:
+                # Check if this is in a mode-specific directory
+                if 'mode_' in path_parts:
+                    segment = 'all'  # Default segment for mode-based organization
+            
+            # Skip if we can't extract all required information
             if not all([segment, mode, depth]):
+                continue
+            
+            # Skip if depth is not a valid number
+            try:
+                depth_int = int(depth)
+            except (ValueError, TypeError):
+                continue
+            
+            # Only include max_depth_10 models
+            if depth_int != 10:
                 continue
             
             try:
@@ -100,7 +111,7 @@ def analyze_all_reports():
                 # Find the positive class (the one with "not preselected")
                 positive_class_name = None
                 for class_name in results.keys():
-                    if class_name != 'overall_accuracy' and class_name != 'probability_stats':
+                    if class_name != 'overall_accuracy':
                         if '(not preselected)' in class_name:
                             positive_class_name = class_name
                             break
@@ -111,15 +122,13 @@ def analyze_all_reports():
                     all_results.append({
                         'segment': segment,
                         'mode': mode,
-                        'max_depth': int(depth),
+                        'max_depth': depth_int,
                         'positive_class': positive_class_name,
                         'precision': positive_metrics['precision'],
                         'recall': positive_metrics['recall'],
                         'f1_score': positive_metrics['f1_score'],
                         'support': positive_metrics['support'],
-                        'accuracy': results.get('overall_accuracy', np.nan),
-                        'mean_probability': results.get('probability_stats', {}).get('mean_probability', np.nan),
-                        'std_probability': results.get('probability_stats', {}).get('std_probability', np.nan)
+                        'accuracy': results.get('overall_accuracy', np.nan)
                     })
                     
             except Exception as e:
@@ -128,67 +137,58 @@ def analyze_all_reports():
     return pd.DataFrame(all_results)
 
 def create_analysis_plots(df):
-    """Create visualization plots for the analysis focusing on positive class metrics."""
+    """Create visualization plots for the decision tree analysis focusing on positive class metrics."""
     
     # Set up the plotting style
     plt.style.use('default')
-    sns.set_palette("RdYlGn")
+    sns.set_palette("YlGn")
+    
+    # Set a common color scale for all heatmaps except support
+    vmin, vmax = 0, 1
     
     # Create a figure with multiple subplots
-    fig, axes = plt.subplots(2, 3, figsize=(20, 14))
-    fig.suptitle('XGBoost Model Performance Analysis - Positive Class Metrics', fontsize=16, fontweight='bold')
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Decision Tree Model Performance Analysis (Max Depth 10) - Positive Class Metrics', fontsize=16, fontweight='bold')
     
     # 1. Precision heatmap
     ax1 = axes[0, 0]
     pivot_precision = df.pivot_table(index='mode', columns='segment', values='precision', aggfunc='mean')
-    sns.heatmap(pivot_precision, annot=True, fmt='.3f', cmap='RdYlGn', ax=ax1, center=0.5)
+    sns.heatmap(pivot_precision, annot=True, fmt='.3f', cmap='YlGn', ax=ax1, center=0.5, vmin=vmin, vmax=vmax)
     ax1.set_title('Positive Class Precision by Mode and Segment')
     
     # 2. Recall heatmap
     ax2 = axes[0, 1]
     pivot_recall = df.pivot_table(index='mode', columns='segment', values='recall', aggfunc='mean')
-    sns.heatmap(pivot_recall, annot=True, fmt='.3f', cmap='RdYlGn', ax=ax2, center=0.5)
+    sns.heatmap(pivot_recall, annot=True, fmt='.3f', cmap='YlGn', ax=ax2, center=0.5, vmin=vmin, vmax=vmax)
     ax2.set_title('Positive Class Recall by Mode and Segment')
     
     # 3. F1 Score heatmap
-    ax3 = axes[0, 2]
+    ax3 = axes[1, 0]
     pivot_f1 = df.pivot_table(index='mode', columns='segment', values='f1_score', aggfunc='mean')
-    sns.heatmap(pivot_f1, annot=True, fmt='.3f', cmap='RdYlGn', ax=ax3, center=0.5)
+    sns.heatmap(pivot_f1, annot=True, fmt='.3f', cmap='YlGn', ax=ax3, center=0.5, vmin=vmin, vmax=vmax)
     ax3.set_title('Positive Class F1 Score by Mode and Segment')
     
-    # 4. Support (class distribution) heatmap
-    ax4 = axes[1, 0]
+    # 4. Support (class distribution) heatmap (no vmin/vmax, but use YlGn)
+    ax4 = axes[1, 1]
     support_by_mode = df.pivot_table(index='mode', columns='segment', values='support', aggfunc='mean')
-    sns.heatmap(support_by_mode, annot=True, fmt='.0f', cmap='YlOrRd', ax=ax4)
+    sns.heatmap(support_by_mode, annot=True, fmt='.0f', cmap='YlGn', ax=ax4)
     ax4.set_title('Positive Class Support by Mode and Segment')
     
-    # 5. Mean Probability heatmap
-    ax5 = axes[1, 1]
-    prob_pivot = df.pivot_table(index='mode', columns='segment', values='mean_probability', aggfunc='mean')
-    sns.heatmap(prob_pivot, annot=True, fmt='.3f', cmap='RdYlGn', ax=ax5, center=0.5)
-    ax5.set_title('Mean Prediction Probability by Mode and Segment')
-    
-    # 6. Standard Deviation of Probability heatmap
-    ax6 = axes[1, 2]
-    std_pivot = df.pivot_table(index='mode', columns='segment', values='std_probability', aggfunc='mean')
-    sns.heatmap(std_pivot, annot=True, fmt='.3f', cmap='YlOrRd', ax=ax6)
-    ax6.set_title('Std Dev of Prediction Probability by Mode and Segment')
-    
     plt.tight_layout()
-    plt.savefig('plots/positive_class_analysis_summary.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('plots/positive_class_analysis_summary.png', dpi=300, bbox_inches='tight')
+    plt.savefig('plots/decision_tree_max_depth_10_analysis_summary.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig('plots/decision_tree_max_depth_10_analysis_summary.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def print_detailed_analysis(df):
-    """Print detailed analysis of the results focusing on positive class metrics."""
+    """Print detailed analysis of the decision tree results focusing on positive class metrics."""
     print("=" * 80)
-    print("XGBOOST CLASSIFICATION MODEL ANALYSIS - POSITIVE CLASS METRICS")
+    print("DECISION TREE CLASSIFICATION MODEL ANALYSIS (MAX DEPTH 10) - POSITIVE CLASS METRICS")
     print("=" * 80)
     
     print(f"\nTotal models analyzed: {len(df)}")
     print(f"Segments: {df['segment'].unique()}")
     print(f"Modes: {df['mode'].unique()}")
-    print(f"Max depths: {df['max_depth'].unique()}")
+    print(f"Max depth: 10 (filtered)")
     
     print("\n" + "=" * 50)
     print("POSITIVE CLASS PERFORMANCE SUMMARY")
@@ -320,8 +320,8 @@ def print_detailed_analysis(df):
     if df['precision'].mean() < 0.7:
         print("  - Overall precision is moderate. Consider:")
         print("    * Feature engineering for better predictive power")
-        print("    * Hyperparameter tuning (learning rate, max_depth)")
-        print("    * Different algorithms (Random Forest, SVM)")
+        print("    * Trying different max_depth values (3, 4, 6, 7)")
+        print("    * Different algorithms (Random Forest, XGBoost)")
     
     if df['recall'].mean() < 0.6:
         print("  - Overall recall is low. Model is missing many positive cases.")
@@ -336,16 +336,17 @@ def print_detailed_analysis(df):
         print("    Consider threshold tuning to improve recall.")
     
     # Segment-specific recommendations
-    airport_data = df[df['segment'] == 'airport']
-    churned_data = df[df['segment'] == 'churned']
-    
-    if len(airport_data) > 0 and len(churned_data) > 0:
-        if airport_data['f1_score'].mean() > churned_data['f1_score'].mean():
-            print("  - Airport segment performs better than churned segment.")
-            print("    Focus on airport-specific features and patterns.")
-        else:
-            print("  - Churned segment performs better than airport segment.")
-            print("    Focus on churned rider-specific features and patterns.")
+    if 'airport' in df['segment'].unique() and 'churned' in df['segment'].unique():
+        airport_data = df[df['segment'] == 'airport']
+        churned_data = df[df['segment'] == 'churned']
+        
+        if len(airport_data) > 0 and len(churned_data) > 0:
+            if airport_data['f1_score'].mean() > churned_data['f1_score'].mean():
+                print("  - Airport segment performs better than churned segment.")
+                print("    Focus on airport-specific features and patterns.")
+            else:
+                print("  - Churned segment performs better than airport segment.")
+                print("    Focus on churned rider-specific features and patterns.")
 
 if __name__ == "__main__":
     # Create plots directory if it doesn't exist
@@ -359,8 +360,8 @@ if __name__ == "__main__":
         create_analysis_plots(df)
         
         # Save the analysis to CSV
-        df.to_csv('reports/positive_class_analysis_summary.csv', index=False)
-        print(f"\n📊 Analysis saved to 'reports/positive_class_analysis_summary.csv'")
-        print(f"📈 Plots saved to 'plots/positive_class_analysis_summary.pdf' and '.png'")
+        df.to_csv('reports/decision_tree_analysis_summary.csv', index=False)
+        print(f"\n📊 Analysis saved to 'reports/decision_tree_analysis_summary.csv'")
+        print(f"📈 Plots saved to 'plots/decision_tree_max_depth_10_analysis_summary.pdf' and '.png'")
     else:
-        print("No classification reports found to analyze.") 
+        print("No decision tree classification reports found to analyze.") 

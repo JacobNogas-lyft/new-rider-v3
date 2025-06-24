@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 import matplotlib.pyplot as plt
@@ -9,42 +9,11 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import joblib
 
+# Configuration parameters
 
-# Original categorical features (commented out for reference)
-# key_categorical_cols = ['region', 'currency', 'passenger_device', 'pax_os', 'pax_carrier']
-
-# Expanded categorical features
-KEY_CATEGORICAL_COLS = [
-    # Original features
-    'region', 'currency', 'passenger_device', 'pax_os', 'pax_carrier',
-    
-    # Venue/Location related
-    'origin_venue_category', 'destination_venue_category',
-    'place_category_pickup', 'place_category_destination',
-    
-    # Availability related
-    'standard_availability_caveat', 'plus_availability_caveat',
-    'premium_availability_caveat', 'lux_availability_caveat',
-    'luxsuv_availability_caveat', 'fastpass_availability_caveat',
-    'standard_saver_availability_caveat', 'green_availability_caveat',
-    'pet_availability_caveat',
-    
-    # Payment related
-    'card_issuer',
-    
-    # Weather related
-    'forecast_hr_gh4_precip_type', 'forecast_hr_gh4_summary',
-    
-    # Historical mode preferences
-    'last_product_key', 'second_last_product_key', 'third_last_product_key',
-    'fourth_last_product_key', 'fifth_last_product_key',
-    'favorite_product_key_28d', 'favorite_product_key_90d'
-]
-
+# Categorical columns to drop (high cardinality features that cause memory issues)
 CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
-                            'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id'
-                            ]#what is label?
-                            #['bundle_set_id', 'rider_session_id', 'occurred_at', 'requested_at', 'candidate_product_keylabel']
+                            'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id']
 
 def add_churned_indicator(df):
     df['ds'] = pd.to_datetime(df['ds'])
@@ -135,6 +104,7 @@ def prepare_features_and_target(df, mode):
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
     
+    # Use all categorical columns except the high cardinality ones
     feature_cols = [col for col in numeric_cols if col not in drop_cols] + [col for col in categorical_cols if (col not in drop_cols) and (col not in CATEGORICAL_COLS_TO_DROP)]
     X = df[feature_cols]
     y = df['target_diff_mode']
@@ -153,122 +123,105 @@ def split_data(X, y):
     print("Splitting data into train and test sets (stratified)...")
     return train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-def train_decision_tree(X_train, y_train, max_depth):
-    print(f"Training Decision Tree (max_depth={max_depth})...")
+def train_random_forest(X_train, y_train, max_depth):
+    print(f"Training Random Forest (max_depth={max_depth})...")
     
-    # Decision Tree parameters - simplified to only use max_depth
-    clf = DecisionTreeClassifier(
-        max_depth=max_depth,
-        random_state=42, 
-        class_weight='balanced'
-    )
+    # Random Forest parameters
+    params = {
+        'n_estimators': 100,
+        'max_depth': max_depth,
+        'min_samples_split': 2,
+        'min_samples_leaf': 1,
+        'max_features': 'sqrt',
+        'bootstrap': True,
+        'random_state': 42,
+        'class_weight': 'balanced',
+        'n_jobs': -1  # Use all available cores
+    }
     
-    try:
-        clf.fit(X_train, y_train)
-        
-        # Print tree information
-        n_nodes = clf.tree_.node_count
-        n_leaves = clf.get_n_leaves()
-        actual_depth = clf.get_depth()
-        print(f"Tree built with {n_nodes} nodes, {n_leaves} leaves, and depth {actual_depth}")
-        
-        print("Model training complete.")
-        return clf
-        
-    except Exception as e:
-        print(f"Error training tree: {e}")
-        print("Trying with limited depth...")
-        
-        # Fallback: try with a reasonable max_depth
-        clf = DecisionTreeClassifier(
-            max_depth=20,  # Reasonable fallback depth
-            random_state=42, 
-            class_weight='balanced'
-        )
-        clf.fit(X_train, y_train)
-        
-        n_nodes = clf.tree_.node_count
-        n_leaves = clf.get_n_leaves()
-        actual_depth = clf.get_depth()
-        print(f"Fallback tree built with {n_nodes} nodes, {n_leaves} leaves, and depth {actual_depth}")
-        
-        return clf
+    # Train Random Forest model
+    clf = RandomForestClassifier(**params)
+    clf.fit(X_train, y_train)
+    
+    print("Model training complete.")
+    return clf
+
+def save_model(clf, models_dir):
+    """Save the trained model and its feature names."""
+    print("Saving model...")
+    models_dir.mkdir(exist_ok=True, parents=True)
+    model_path = models_dir / 'random_forest_model.joblib'
+    joblib.dump(clf, model_path)
+    print(f"Saved model to {model_path}")
 
 def evaluate_model(clf, X_test, y_test, class_names, reports_dir):
     print("Evaluating model...")
     y_pred = clf.predict(X_test)
+    y_pred_proba = clf.predict_proba(X_test)[:, 1]
+    
     report = classification_report(y_test, y_pred, target_names=class_names)
     reports_dir.mkdir(exist_ok=True, parents=True)
     report_path = reports_dir / 'classification_report.txt'
     with open(report_path, 'w') as f:
         f.write(report)
         f.write(f"\nAccuracy: {accuracy_score(y_test, y_pred):.3f}\n")
+        f.write(f"\nPrediction probabilities summary:\n")
+        f.write(f"Min probability: {y_pred_proba.min():.4f}\n")
+        f.write(f"Max probability: {y_pred_proba.max():.4f}\n")
+        f.write(f"Mean probability: {y_pred_proba.mean():.4f}\n")
+        f.write(f"Std probability: {y_pred_proba.std():.4f}\n")
     print(f"Saved classification report to {report_path}")
-
-def visualize_tree(clf, X, class_names, plots_dir, max_depth):
-    print("Visualizing tree...")
-    plots_dir.mkdir(exist_ok=True, parents=True)
-    plt.figure(figsize=(24, 8))
-    plot_tree(clf, feature_names=X.columns, class_names=class_names, filled=True, max_depth=min(3, max_depth), fontsize=8)
-    plt.title(f'Decision Tree (first 3 levels, max_depth={max_depth})', fontsize=14)
-    plt.tight_layout()
-    plt.savefig(plots_dir / 'decision_tree_plot.svg')
-    print(f"Saved decision tree plot to {plots_dir / 'decision_tree_plot.svg'}")
-    plt.figure(figsize=(24, 24))
-    plot_tree(clf, feature_names=X.columns, class_names=class_names, filled=True, fontsize=8)
-    plt.title(f'Decision Tree (full depth, max_depth={max_depth})', fontsize=14)
-    plt.tight_layout()
-    plt.savefig(plots_dir / 'decision_tree_plot_full.svg')
-    print(f"Saved full decision tree plot to {plots_dir / 'decision_tree_plot_full.svg'}")
 
 def plot_feature_importance(clf, X, plots_dir):
     print("Plotting feature importances...")
+    
+    # Create the plots directory if it doesn't exist
+    plots_dir.mkdir(exist_ok=True, parents=True)
+    
     importances = clf.feature_importances_
     indices = np.argsort(importances)[::-1]
     top_n = 20
+    
     plt.figure(figsize=(16, 8))
-    plt.title('Feature Importances (Top 20)', fontsize=20)
+    plt.title('Random Forest Feature Importances (Top 20)', fontsize=20)
     plt.bar(range(top_n), importances[indices][:top_n], align='center')
     plt.xticks(range(top_n), [X.columns[i] for i in indices[:top_n]], rotation=45, ha='right', fontsize=12)
     plt.ylabel('Importance', fontsize=16)
     plt.tight_layout()
     plt.savefig(plots_dir / 'feature_importance.pdf')
     print(f"Saved feature importance plot to {plots_dir / 'feature_importance.pdf'}")
-
-def save_model(clf, models_dir):
-    """Save the trained decision tree model and its feature names."""
-    print("Saving model...")
-    models_dir.mkdir(exist_ok=True, parents=True)
-    model_path = models_dir / 'decision_tree_model.joblib'
-    joblib.dump(clf, model_path)
-    print(f"Saved model to {model_path}")
+    
+    # Also save as SVG for better quality
+    plt.savefig(plots_dir / 'feature_importance.svg')
+    print(f"Saved feature importance plot to {plots_dir / 'feature_importance.svg'}")
+    
+    # Close the plot to free memory
+    plt.close()
 
 def run_for_mode_and_depth(df, mode, max_depth, segment_type):
     print(f"\n=== Running for segment: {segment_type}, mode: {mode}, max_depth: {max_depth} ===")
-    
     X, y, feature_cols = prepare_features_and_target(df, mode)
     # If only one class, skip
     if y.nunique() < 2:
         print(f"Skipping segment={segment_type}, mode={mode}, max_depth={max_depth}: only one class present.")
         return
     X_train, X_test, y_train, y_test = split_data(X, y)
-    clf = train_decision_tree(X_train, y_train, max_depth)
+    clf = train_random_forest(X_train, y_train, max_depth)
     class_names = [f'not {mode}', f'{mode} (not preselected)']
     
-    # Create directory names - simplified without pruning info
-    max_depth_str = str(max_depth) if max_depth is not None else "unbounded"
+    # Define directories
     base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
-    plots_dir = base_path / f'plots/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
-    reports_dir = base_path / f'reports/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
-    models_dir = base_path / f'models/decision_tree/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
+    plots_dir = base_path / f'plots/random_forest/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    reports_dir = base_path / f'reports/random_forest/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    models_dir = base_path / f'models/random_forest/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
     
-    evaluate_model(clf, X_test, y_test, class_names, reports_dir)
-    visualize_tree(clf, X, class_names, plots_dir, max_depth)
-    plot_feature_importance(clf, X, plots_dir)
+    # Save model, evaluate, and create plots
     save_model(clf, models_dir)
+    evaluate_model(clf, X_test, y_test, class_names, reports_dir)
+    plot_feature_importance(clf, X, plots_dir)
 
 def main(mode_list, max_depth_list, segment_type_list):
-    print(f"Training decision trees for segments: {segment_type_list}")
+    print(f"Training Random Forest models for segments: {segment_type_list}")
     print(f"Modes: {mode_list}")
     print(f"Max depths: {max_depth_list}")
     print("="*60)
@@ -294,6 +247,12 @@ def main(mode_list, max_depth_list, segment_type_list):
         
         print(f"Segment data shape: {df_segment.shape}")
         
+        # Create base directories
+        base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
+        (base_path / 'models/random_forest/all_features').mkdir(exist_ok=True, parents=True)
+        (base_path / 'plots/random_forest/all_features').mkdir(exist_ok=True, parents=True)
+        (base_path / 'reports/random_forest/all_features').mkdir(exist_ok=True, parents=True)
+        
         # Parallelize using ProcessPoolExecutor
         tasks = []
         with ProcessPoolExecutor() as executor:
@@ -315,8 +274,9 @@ def main(mode_list, max_depth_list, segment_type_list):
         
         print(f"\nTraining completed for segment: {segment_type}")
         print(f"Results saved to:")
-        print(f"  - Plots: /home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree/all_features/segment_{segment_type}/")
-        print(f"  - Reports: /home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree/all_features/segment_{segment_type}/")
+        print(f"  - Models: {base_path}/models/random_forest/all_features/segment_{segment_type}/")
+        print(f"  - Plots: {base_path}/plots/random_forest/all_features/segment_{segment_type}/")
+        print(f"  - Reports: {base_path}/reports/random_forest/all_features/segment_{segment_type}/")
 
 if __name__ == "__main__":
     # Configuration
