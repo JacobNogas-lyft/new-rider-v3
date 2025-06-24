@@ -10,8 +10,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import joblib
 
 # Configuration parameters
-SEGMENT_TYPE = 'airport'  # Options: 'airport', 'churned', 'all'
-MAX_DEPTH = 5
+
+# Categorical columns to drop (high cardinality features that cause memory issues)
+CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
+                            'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id']
 
 def add_churned_indicator(df):
     df['ds'] = pd.to_datetime(df['ds'])
@@ -76,13 +78,44 @@ def load_and_prepare_data(segment_type='all'):
 
 def prepare_features_and_target(df, mode):
     df['target_diff_mode'] = ((df['requested_ride_type'] != df['preselected_mode']) & (df['requested_ride_type'] == mode)).astype(int)
+    
+    # Add percentage features for lifetime rides
+    print("Creating percentage features for lifetime rides...")
+    
+    # Handle division by zero by replacing 0 with NaN, then filling with 0
+    df['percent_rides_standard_lifetime'] = (
+        df['rides_standard_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    df['percent_rides_premium_lifetime'] = (
+        df['rides_premium_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    df['percent_rides_plus_lifetime'] = (
+        df['rides_plus_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    print(f"Created percentage features:")
+    print(f"  - percent_rides_standard_lifetime: {df['percent_rides_standard_lifetime'].describe()}")
+    print(f"  - percent_rides_premium_lifetime: {df['percent_rides_premium_lifetime'].describe()}")
+    print(f"  - percent_rides_plus_lifetime: {df['percent_rides_plus_lifetime'].describe()}")
+    
     drop_cols = ['target_diff_mode', 'requested_ride_type', 'preselected_mode']
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
-    key_categorical_cols = ['region', 'currency', 'passenger_device', 'pax_os', 'pax_carrier']
-    feature_cols = [col for col in numeric_cols if col not in drop_cols] + key_categorical_cols
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    # Use all categorical columns except the high cardinality ones
+    feature_cols = [col for col in numeric_cols if col not in drop_cols] + [col for col in categorical_cols if (col not in drop_cols) and (col not in CATEGORICAL_COLS_TO_DROP)]
     X = df[feature_cols]
     y = df['target_diff_mode']
+    
+    print(f"Before get_dummies - X shape: {X.shape}")
+    print(f"Memory usage before encoding: {X.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+    
     X = pd.get_dummies(X, drop_first=True)
+    
+    print(f"After get_dummies - X shape: {X.shape}")
+    print(f"Memory usage after encoding: {X.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
     print("Data loaded and processed.")
     return X, y, feature_cols
 
@@ -186,48 +219,80 @@ def run_for_mode_and_depth(df, mode, max_depth, segment_type):
     
     # Define directories
     base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
-    plots_dir = base_path / f'plots/xg_boost/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
-    reports_dir = base_path / f'reports/xg_boost/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
-    models_dir = base_path / f'models/xg_boost/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    plots_dir = base_path / f'plots/xg_boost/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    reports_dir = base_path / f'reports/xg_boost/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    models_dir = base_path / f'models/xg_boost/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
     
     # Save model, evaluate, and create plots
     save_model(clf, models_dir)
     evaluate_model(clf, X_test, y_test, class_names, reports_dir)
     plot_feature_importance(clf, X, plots_dir)
 
-def main(mode_list, max_depth_list, segment_type='all'):
-    print(f"Training XGBoost models for segment: {segment_type}")
+def main(mode_list, max_depth_list, segment_type_list):
+    print(f"Training XGBoost models for segments: {segment_type_list}")
     print(f"Modes: {mode_list}")
     print(f"Max depths: {max_depth_list}")
     print("="*60)
     
-    df = load_and_prepare_data(segment_type)
+    # Load data once
+    print("Loading data...")
+    df = load_parquet_data()
+    df = add_churned_indicator(df)
+    df.drop(columns=CATEGORICAL_COLS_TO_DROP, inplace=True)
     
-    # Create base directories
-    base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
-    (base_path / 'models/xg_boost').mkdir(exist_ok=True, parents=True)
-    (base_path / 'plots/xg_boost').mkdir(exist_ok=True, parents=True)
-    (base_path / 'reports/xg_boost').mkdir(exist_ok=True, parents=True)
-    
-    # Parallelize using ProcessPoolExecutor
-    tasks = []
-    with ProcessPoolExecutor() as executor:
-        for max_depth in max_depth_list:
-            for mode in mode_list:
-                tasks.append(executor.submit(run_for_mode_and_depth, df, mode, max_depth, segment_type))
-        for future in as_completed(tasks):
-            future.result()  # To raise exceptions if any
-    
-    print(f"\nTraining completed for segment: {segment_type}")
-    print(f"Results saved to:")
-    print(f"  - Models: {base_path}/models/xg_boost/segment_{segment_type}/")
-    print(f"  - Plots: {base_path}/plots/xg_boost/segment_{segment_type}/")
-    print(f"  - Reports: {base_path}/reports/xg_boost/segment_{segment_type}/")
+    # Process each segment type
+    for segment_type in segment_type_list:
+        print(f"\n{'='*60}")
+        print(f"Processing segment: {segment_type}")
+        print(f"{'='*60}")
+        
+        # Filter data for this segment
+        df_segment = filter_by_segment(df, segment_type)
+        
+        # Filter out rows with missing required columns
+        required_cols = ['requested_ride_type', 'preselected_mode']
+        df_segment = df_segment.dropna(subset=required_cols)
+        
+        print(f"Segment data shape: {df_segment.shape}")
+        
+        # Create base directories
+        base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
+        (base_path / 'models/xg_boost/all_features').mkdir(exist_ok=True, parents=True)
+        (base_path / 'plots/xg_boost/all_features').mkdir(exist_ok=True, parents=True)
+        (base_path / 'reports/xg_boost/all_features').mkdir(exist_ok=True, parents=True)
+        
+        # Parallelize using ProcessPoolExecutor
+        tasks = []
+        with ProcessPoolExecutor() as executor:
+            for max_depth in max_depth_list:
+                for mode in mode_list:
+                    tasks.append(executor.submit(
+                        run_for_mode_and_depth, 
+                        df_segment, mode, max_depth, segment_type
+                    ))
+            
+            # Process results with better error handling
+            for i, future in enumerate(as_completed(tasks)):
+                try:
+                    future.result()  # To raise exceptions if any
+                except Exception as e:
+                    print(f"Error in task {i}: {e}")
+                    print("Continuing with other tasks...")
+                    continue
+        
+        print(f"\nTraining completed for segment: {segment_type}")
+        print(f"Results saved to:")
+        print(f"  - Models: {base_path}/models/xg_boost/all_features/segment_{segment_type}/")
+        print(f"  - Plots: {base_path}/plots/xg_boost/all_features/segment_{segment_type}/")
+        print(f"  - Reports: {base_path}/reports/xg_boost/all_features/segment_{segment_type}/")
 
 if __name__ == "__main__":
     # Configuration
-    segment_type = 'churned'  # Options: 'airport', 'churned', 'all'
-    mode_list = ['fastpass', 'standard', 'premium', 'plus', 'lux', 'luxsuv']
-    max_depth_list = [10]
+    segment_type_list = ['churned', 'airport', 'all']
     
-    main(mode_list, max_depth_list, segment_type) 
+    # Max depth list - simplified
+    max_depth_list = [10]  # Simple depth values
+    
+    mode_list = ['fastpass', 'standard', 'premium', 'plus', 'lux', 'luxsuv']
+    
+    main(mode_list, max_depth_list, segment_type_list) 
