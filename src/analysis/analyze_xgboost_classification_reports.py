@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 
+# Total sessions from standard/all segment (118634 not standard + 4291 standard not preselected)
+TOTAL_SESSIONS = 122925
+
 def parse_classification_report(file_path):
     """Parse a classification report file and extract metrics."""
     with open(file_path, 'r') as f:
@@ -64,7 +67,7 @@ def analyze_all_reports():
     all_results = []
     
     # Walk through the reports directory
-    for root, _, files in os.walk('reports'):
+    for root, _, files in os.walk('../reports'):
         for file in files:
             if file != 'classification_report.txt':
                 continue
@@ -97,31 +100,23 @@ def analyze_all_reports():
             try:
                 results = parse_classification_report(file_path)
                 
-                # Find the positive class (the one with "not preselected")
-                positive_class_name = None
-                for class_name in results.keys():
-                    if class_name != 'overall_accuracy' and class_name != 'probability_stats':
-                        if '(not preselected)' in class_name:
-                            positive_class_name = class_name
-                            break
-                
-                if positive_class_name and positive_class_name in results:
-                    positive_metrics = results[positive_class_name]
-                    
+                # Collect metrics for all classes (not just positive)
+                for class_name, metrics in results.items():
+                    if class_name in ['overall_accuracy', 'probability_stats']:
+                        continue
                     all_results.append({
                         'segment': segment,
                         'mode': mode,
                         'max_depth': int(depth),
-                        'positive_class': positive_class_name,
-                        'precision': positive_metrics['precision'],
-                        'recall': positive_metrics['recall'],
-                        'f1_score': positive_metrics['f1_score'],
-                        'support': positive_metrics['support'],
+                        'class_name': class_name,
+                        'precision': metrics['precision'],
+                        'recall': metrics['recall'],
+                        'f1_score': metrics['f1_score'],
+                        'support': metrics['support'],
                         'accuracy': results.get('overall_accuracy', np.nan),
                         'mean_probability': results.get('probability_stats', {}).get('mean_probability', np.nan),
                         'std_probability': results.get('probability_stats', {}).get('std_probability', np.nan)
                     })
-                    
             except Exception as e:
                 print(f"Error parsing {file_path}: {e}")
     
@@ -137,49 +132,53 @@ def create_analysis_plots(df):
     # Set a common color scale for all heatmaps except support
     vmin, vmax = 0, 1
     
+    # Only keep positive class rows
+    positive_df = df[df['class_name'].str.contains('(not preselected)')].copy()
+    positive_df['support_pct'] = (positive_df['support'] / TOTAL_SESSIONS) * 100  # Use hardcoded total
+    pivot_support_pct = positive_df.pivot_table(index='mode', columns='segment', values='support_pct')
+    
     # Create a figure with multiple subplots (2 rows, 3 columns)
     fig, axes = plt.subplots(2, 3, figsize=(20, 14))
     fig.suptitle('XGBoost Model Performance Analysis - Positive Class Metrics', fontsize=16, fontweight='bold')
-    
+
     # 1. Precision heatmap
     ax1 = axes[0, 0]
-    pivot_precision = df.pivot_table(index='mode', columns='segment', values='precision', aggfunc='mean')
+    pivot_precision = positive_df.pivot_table(index='mode', columns='segment', values='precision', aggfunc='mean')
     sns.heatmap(pivot_precision, annot=True, fmt='.3f', cmap='YlGn', ax=ax1, center=0.5, vmin=vmin, vmax=vmax)
     ax1.set_title('Positive Class Precision by Mode and Segment')
     
     # 2. Recall heatmap
     ax2 = axes[0, 1]
-    pivot_recall = df.pivot_table(index='mode', columns='segment', values='recall', aggfunc='mean')
+    pivot_recall = positive_df.pivot_table(index='mode', columns='segment', values='recall', aggfunc='mean')
     sns.heatmap(pivot_recall, annot=True, fmt='.3f', cmap='YlGn', ax=ax2, center=0.5, vmin=vmin, vmax=vmax)
     ax2.set_title('Positive Class Recall by Mode and Segment')
     
     # 3. F1 Score heatmap
     ax3 = axes[0, 2]
-    pivot_f1 = df.pivot_table(index='mode', columns='segment', values='f1_score', aggfunc='mean')
+    pivot_f1 = positive_df.pivot_table(index='mode', columns='segment', values='f1_score', aggfunc='mean')
     sns.heatmap(pivot_f1, annot=True, fmt='.3f', cmap='YlGn', ax=ax3, center=0.5, vmin=vmin, vmax=vmax)
     ax3.set_title('Positive Class F1 Score by Mode and Segment')
     
     # 4. Support (class distribution) heatmap (no vmin/vmax, but use YlGn)
     ax4 = axes[1, 0]
-    support_by_mode = df.pivot_table(index='mode', columns='segment', values='support', aggfunc='mean')
+    support_by_mode = positive_df.pivot_table(index='mode', columns='segment', values='support', aggfunc='mean')
     sns.heatmap(support_by_mode, annot=True, fmt='.0f', cmap='YlGn', ax=ax4)
     ax4.set_title('Positive Class Support by Mode and Segment')
     
-    # 5. Mean Probability heatmap
+    # 5. Support percentage heatmap (new, vmin=0, vmax=100)
     ax5 = axes[1, 1]
-    prob_pivot = df.pivot_table(index='mode', columns='segment', values='mean_probability', aggfunc='mean')
-    sns.heatmap(prob_pivot, annot=True, fmt='.3f', cmap='YlGn', ax=ax5, center=0.5, vmin=vmin, vmax=vmax)
-    ax5.set_title('Mean Prediction Probability by Mode and Segment')
+    sns.heatmap(pivot_support_pct, annot=True, fmt='.1f', cmap='YlGn', ax=ax5, vmin=0, vmax=100)
+    # Add % to the annotations after they're created
+    for t in ax5.texts:
+        t.set_text(t.get_text() + '%')
+    ax5.set_title('Positive Class Support (% of Total Standard/All Sessions) by Mode and Segment')
     
-    # 6. Standard Deviation of Probability heatmap
-    ax6 = axes[1, 2]
-    std_pivot = df.pivot_table(index='mode', columns='segment', values='std_probability', aggfunc='mean')
-    sns.heatmap(std_pivot, annot=True, fmt='.3f', cmap='YlGn', ax=ax6, vmin=vmin, vmax=vmax)
-    ax6.set_title('Std Dev of Prediction Probability by Mode and Segment')
+    # 6. Remove the last subplot (axes[1, 2])
+    fig.delaxes(axes[1, 2])
     
     plt.tight_layout()
-    plt.savefig('plots/positive_class_analysis_summary.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('plots/positive_class_analysis_summary.png', dpi=300, bbox_inches='tight')
+    plt.savefig('../plots/positive_class_analysis_summary.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig('../plots/positive_class_analysis_summary.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def print_detailed_analysis(df):
@@ -362,8 +361,8 @@ if __name__ == "__main__":
         create_analysis_plots(df)
         
         # Save the analysis to CSV
-        df.to_csv('reports/positive_class_analysis_summary.csv', index=False)
-        print(f"\n📊 Analysis saved to 'reports/positive_class_analysis_summary.csv'")
-        print(f"📈 Plots saved to 'plots/positive_class_analysis_summary.pdf' and '.png'")
+        df.to_csv('../reports/positive_class_analysis_summary.csv', index=False)
+        print(f"\n📊 Analysis saved to '../reports/positive_class_analysis_summary.csv'")
+        print(f"📈 Plots saved to '../plots/positive_class_analysis_summary.pdf' and '.png'")
     else:
         print("No classification reports found to analyze.") 

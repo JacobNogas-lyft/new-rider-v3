@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.metrics import classification_report, make_scorer, precision_score
-from load_data import load_parquet_data
+from utils.load_data import load_parquet_data
 from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns

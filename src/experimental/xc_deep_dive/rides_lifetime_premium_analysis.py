@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 
 # Add the src directory to the path so we can import load_data
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from load_data import load_parquet_data
+from utils.load_data import load_parquet_data
 
 import logging
 

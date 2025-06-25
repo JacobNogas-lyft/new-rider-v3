@@ -52,7 +52,7 @@ def analyze_all_reports():
     all_results = []
     
     # Walk through the reports directory
-    for root, _, files in os.walk('reports/decision_tree'):
+    for root, _, files in os.walk('../reports/decision_tree'):
         for file in files:
             if file != 'classification_report.txt':
                 continue
@@ -175,8 +175,8 @@ def create_analysis_plots(df):
     ax4.set_title('Positive Class Support by Mode and Segment')
     
     plt.tight_layout()
-    plt.savefig('plots/decision_tree_max_depth_10_analysis_summary.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('plots/decision_tree_max_depth_10_analysis_summary.png', dpi=300, bbox_inches='tight')
+    plt.savefig('../plots/decision_tree_max_depth_10_analysis_summary.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig('../plots/decision_tree_max_depth_10_analysis_summary.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 def print_detailed_analysis(df):
@@ -360,8 +360,8 @@ if __name__ == "__main__":
         create_analysis_plots(df)
         
         # Save the analysis to CSV
-        df.to_csv('reports/decision_tree_analysis_summary.csv', index=False)
-        print(f"\n📊 Analysis saved to 'reports/decision_tree_analysis_summary.csv'")
-        print(f"📈 Plots saved to 'plots/decision_tree_max_depth_10_analysis_summary.pdf' and '.png'")
+        df.to_csv('../reports/decision_tree_analysis_summary.csv', index=False)
+        print(f"\n📊 Analysis saved to '../reports/decision_tree_analysis_summary.csv'")
+        print(f"📈 Plots saved to '../plots/decision_tree_max_depth_10_analysis_summary.pdf' and '.png'")
     else:
         print("No decision tree classification reports found to analyze.") 

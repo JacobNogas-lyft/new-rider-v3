@@ -4,7 +4,7 @@ from xgboost import XGBClassifier, plot_importance
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 import matplotlib.pyplot as plt
-from load_data import load_parquet_data
+from utils.load_data import load_parquet_data
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 

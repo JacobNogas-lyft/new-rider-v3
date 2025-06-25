@@ -23,7 +23,7 @@ def extract_decision_tree_feature_importance(model_path):
 def analyze_decision_tree_feature_importance():
     """Analyze feature importance across all saved decision tree models (all_features only)."""
     all_results = []
-    for root, _, files in os.walk('models/decision_tree'):
+    for root, _, files in os.walk('../models/decision_tree'):
         for file in files:
             if file != 'decision_tree_model.joblib':
                 continue
@@ -55,16 +55,82 @@ def analyze_decision_tree_feature_importance():
     return pd.concat(all_results, ignore_index=True)
 
 def create_feature_importance_summary_decision_tree(df):
-    """Create a grid of subplots for decision tree feature importance by (segment, mode)."""
+    """Create separate feature importance plots for each segment."""
     if df is None:
         return
+    
     plt.style.use('default')
+    
+    # Create summary subdirectory
+    Path('../plots/summary').mkdir(exist_ok=True)
+    
+    # Create separate plots for each segment
+    for segment in df['segment'].unique():
+        segment_df = df[df['segment'] == segment]
+        
+        # Get unique modes for this segment
+        modes = segment_df['mode'].unique()
+        n_modes = len(modes)
+        
+        # Create subplot grid for this segment
+        ncols = 2
+        nrows = int(np.ceil(n_modes / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 8, nrows * 6))
+        
+        # Handle single subplot case
+        if n_modes == 1:
+            axes = [axes]
+        elif nrows == 1:
+            axes = axes.reshape(1, -1)
+        else:
+            axes = axes.flatten()
+        
+        # Create subplot for each mode in this segment
+        for idx, mode in enumerate(modes):
+            mode_data = segment_df[segment_df['mode'] == mode]
+            
+            # Get top 15 features for this mode
+            top_features = mode_data.sort_values('importance', ascending=False).head(15)
+            
+            ax = axes[idx]
+            bars = ax.barh(top_features['feature'][::-1], top_features['importance'][::-1], 
+                          color='royalblue', alpha=0.8, edgecolor='navy')
+            
+            # Add value labels on bars
+            for i, (bar, importance) in enumerate(zip(bars, top_features['importance'][::-1])):
+                ax.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height()/2, 
+                       f'{importance:.3f}', ha='left', va='center', fontsize=9, fontweight='bold')
+            
+            ax.set_xlabel('Feature Importance', fontsize=12)
+            ax.set_title(f'{mode.upper()} Mode\nDecision Tree Feature Importance - {segment.upper()} Segment', fontsize=13, fontweight='bold')
+            ax.tick_params(axis='y', labelsize=10)
+            ax.grid(axis='x', alpha=0.3)
+            
+            # Set x-axis limit to accommodate labels
+            max_importance = top_features['importance'].max()
+            ax.set_xlim(0, max_importance * 1.15)
+        
+        # Remove empty subplots
+        for j in range(len(modes), len(axes)):
+            fig.delaxes(axes[j])
+        
+        plt.tight_layout()
+        
+        # Save segment-specific plot
+        segment_filename = f'decision_tree_feature_importance_{segment}_segment.png'
+        plt.savefig(f'../plots/summary/{segment_filename}', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"📊 Saved {segment_filename}")
+    
+    # Also create the original combined plot for reference
     pairs = list(df.groupby(['segment', 'mode']).groups.keys())
     n_pairs = len(pairs)
     ncols = 3
     nrows = int(np.ceil(n_pairs / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 7, nrows * 7))
     axes = axes.flatten() if n_pairs > 1 else [axes]
+    
     for idx, ((segment, mode), group) in enumerate(df.groupby(['segment', 'mode'])):
         top_features = group.sort_values('importance', ascending=False).head(20)
         ax = axes[idx]
@@ -72,17 +138,21 @@ def create_feature_importance_summary_decision_tree(df):
         ax.set_xlabel('Importance')
         ax.set_title(f'Segment: {segment}\nMode: {mode}')
         ax.tick_params(axis='y', labelsize=8)
+    
     for j in range(idx + 1, len(axes)):
         fig.delaxes(axes[j])
+    
     plt.tight_layout()
     plt.suptitle('Top 20 Decision Tree Feature Importances by Segment and Mode', fontsize=18, y=1.02)
-    plt.savefig('plots/feature_importance_by_segment_mode_decision_tree.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('plots/feature_importance_by_segment_mode_decision_tree.png', dpi=300, bbox_inches='tight')
+    plt.savefig('../plots/feature_importance_by_segment_mode_decision_tree.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig('../plots/feature_importance_by_segment_mode_decision_tree.png', dpi=300, bbox_inches='tight')
     plt.close()
-    print("\n📊 Summary grid plot saved to 'plots/feature_importance_by_segment_mode_decision_tree.pdf' and '.png'")
+    
+    print("\n📊 Summary grid plot saved to '../plots/feature_importance_by_segment_mode_decision_tree.pdf' and '.png'")
+    print("📊 Segment-specific plots saved to '../plots/summary/decision_tree_feature_importance_<segment>_segment.png'")
 
 if __name__ == "__main__":
-    Path('plots').mkdir(exist_ok=True)
+    Path('../plots').mkdir(exist_ok=True)
     df = analyze_decision_tree_feature_importance()
     if df is not None:
         create_feature_importance_summary_decision_tree(df) 

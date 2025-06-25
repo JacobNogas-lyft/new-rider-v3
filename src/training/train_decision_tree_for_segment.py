@@ -4,8 +4,11 @@ from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 import matplotlib.pyplot as plt
-from load_data import load_parquet_data
+from utils.load_data import load_parquet_data
 from pathlib import Path
+
+# Configuration parameters
+MAX_DEPTH = 10
 
 # Create plots directory
 PLOTS_DIR = Path('/home/sagemaker-user/studio/src/new-rider-v3/plots')
@@ -22,14 +25,56 @@ def add_churned_indicator(df):
     df['is_churned_user'] = churned_mask.astype(int)
     return df
 
+def filter_by_segment(df, segment_type):
+    """
+    Filter dataframe by segment type.
+    
+    Args:
+        df (pandas.DataFrame): Input dataframe
+        segment_type (str): Type of segment to filter by
+            - 'airport': Sessions where destination_venue_category = 'airport' or origin_venue_category = 'airport'
+            - 'churned': Sessions where rider is churned (is_churned_user = 1)
+            - 'all': No filtering (use all data)
+    
+    Returns:
+        pandas.DataFrame: Filtered dataframe
+    """
+    if segment_type == 'airport':
+        # Filter for airport sessions
+        airport_mask = (
+            (df['destination_venue_category'] == 'airport') | 
+            (df['origin_venue_category'] == 'airport')
+        )
+        filtered_df = df[airport_mask].copy()
+        print(f"Airport sessions: {len(filtered_df)} rows (from {len(df)} total)")
+        
+    elif segment_type == 'churned':
+        # Filter for churned riders
+        churned_mask = (df['is_churned_user'] == 1)
+        filtered_df = df[churned_mask].copy()
+        print(f"Churned rider sessions: {len(filtered_df)} rows (from {len(df)} total)")
+        
+    elif segment_type == 'all':
+        # No filtering
+        filtered_df = df.copy()
+        print(f"Using all data: {len(filtered_df)} rows")
+        
+    else:
+        raise ValueError(f"Unknown segment type: {segment_type}. Use 'airport', 'churned', or 'all'")
+    
+    return filtered_df
+
 # --- Main script ---
-def load_and_prepare_data():
-    print("Loading data...")
+def load_and_prepare_data(segment_type='all'):
+    print(f"Loading data for segment: {segment_type}...")
     df = load_parquet_data()
     print(f"Loaded {len(df)} rows and {len(df.columns)} columns")
 
     # Add churned user indicator
     df = add_churned_indicator(df)
+
+    # Filter by segment
+    df = filter_by_segment(df, segment_type)
 
     # Drop rows with missing required columns
     required_cols = ['requested_ride_type', 'preselected_mode']
@@ -37,6 +82,27 @@ def load_and_prepare_data():
 
     # Create target: 1 if requested_ride_type != preselected_mode, else 0
     df['target_diff_mode'] = (df['requested_ride_type'] != df['preselected_mode']).astype(int)
+
+    # Add percentage features for lifetime rides
+    print("Creating percentage features for lifetime rides...")
+    
+    # Handle division by zero by replacing 0 with NaN, then filling with 0
+    df['percent_rides_standard_lifetime'] = (
+        df['rides_standard_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    df['percent_rides_premium_lifetime'] = (
+        df['rides_premium_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    df['percent_rides_plus_lifetime'] = (
+        df['rides_plus_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
+    ).fillna(0)
+    
+    print(f"Created percentage features:")
+    print(f"  - percent_rides_standard_lifetime: {df['percent_rides_standard_lifetime'].describe()}")
+    print(f"  - percent_rides_premium_lifetime: {df['percent_rides_premium_lifetime'].describe()}")
+    print(f"  - percent_rides_plus_lifetime: {df['percent_rides_plus_lifetime'].describe()}")
 
     # Prepare features: drop target and columns that leak target
     drop_cols = ['target_diff_mode', 'requested_ride_type', 'preselected_mode']
@@ -113,17 +179,36 @@ def plot_feature_importance(clf, X, plots_dir):
     plt.savefig(plots_dir / 'feature_importance.svg')
     print(f"Saved feature importance plot to {plots_dir / 'feature_importance.svg'}")
 
-def main(max_depth=5):
-    X, y, feature_cols = load_and_prepare_data()
+def main(segment_type='all', max_depth=5):
+    """
+    Main function to train decision tree for a specific segment.
+    
+    Args:
+        segment_type (str): Type of segment ('airport', 'churned', or 'all')
+        max_depth (int): Maximum depth of the decision tree
+    """
+    print(f"Training decision tree for segment: {segment_type}")
+    print(f"Max depth: {max_depth}")
+    print("="*60)
+    
+    X, y, feature_cols = load_and_prepare_data(segment_type)
     X_train, X_test, y_train, y_test = split_data(X, y)
     clf = train_decision_tree(X_train, y_train, max_depth)
     class_names = ['requested preselected mode', 'requested non-preselected mode']
-    # Create subfolders for this max_depth and model type
-    plots_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree/max_depth_{max_depth}')
-    reports_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree/max_depth_{max_depth}')
+    
+    # Create subfolders for this segment, max_depth and model type
+    plots_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree/all_features/segment_{segment_type}/max_depth_{max_depth}')
+    reports_dir = Path(f'/home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree/all_features/segment_{segment_type}/max_depth_{max_depth}')
+    
     evaluate_model(clf, X_test, y_test, class_names, reports_dir)
     visualize_tree(clf, X, class_names, plots_dir, max_depth)
     plot_feature_importance(clf, X, plots_dir)
+    
+    print(f"\nTraining completed for segment: {segment_type}")
+    print(f"Results saved to:")
+    print(f"  - Plots: {plots_dir}")
+    print(f"  - Reports: {reports_dir}")
 
 if __name__ == "__main__":
-    main(3) 
+    segment_type = 'airport'  # Options: 'airport', 'churned', 'all'
+    main(segment_type, MAX_DEPTH) 
