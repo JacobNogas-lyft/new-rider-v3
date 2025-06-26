@@ -13,7 +13,8 @@ import joblib
 
 # Categorical columns to drop (high cardinality features that cause memory issues)
 CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
-                            'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id']
+                            'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id',
+                            'rider_lyft_id']
 
 def add_churned_indicator(df):
     df['ds'] = pd.to_datetime(df['ds'])
@@ -64,9 +65,9 @@ def filter_by_segment(df, segment_type):
     
     return filtered_df
 
-def load_and_prepare_data(segment_type='all'):
-    print(f"Loading and preparing data for segment: {segment_type}...")
-    df = load_parquet_data()
+def load_and_prepare_data(segment_type='all', use_v2=False):
+    print(f"Loading and preparing data for segment: {segment_type} (use_v2={use_v2})...")
+    df = load_parquet_data(use_v2)
     df = add_churned_indicator(df)
     
     # Filter by segment
@@ -96,9 +97,6 @@ def prepare_features_and_target(df, mode):
     ).fillna(0)
     
     print(f"Created percentage features:")
-    print(f"  - percent_rides_standard_lifetime: {df['percent_rides_standard_lifetime'].describe()}")
-    print(f"  - percent_rides_premium_lifetime: {df['percent_rides_premium_lifetime'].describe()}")
-    print(f"  - percent_rides_plus_lifetime: {df['percent_rides_plus_lifetime'].describe()}")
     
     drop_cols = ['target_diff_mode', 'requested_ride_type', 'preselected_mode']
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
@@ -206,39 +204,56 @@ def plot_feature_importance(clf, X, plots_dir):
     # Close the plot to free memory
     plt.close()
 
-def run_for_mode_and_depth(df, mode, max_depth, segment_type):
-    print(f"\n=== Running for segment: {segment_type}, mode: {mode}, max_depth: {max_depth} ===")
+def run_for_mode_and_depth(df, mode, max_depth, segment_type, use_v2=False):
+    print(f"\n=== Running for segment: {segment_type}, mode: {mode}, max_depth: {max_depth}, use_v2: {use_v2} ===")
     X, y, feature_cols = prepare_features_and_target(df, mode)
     # If only one class, skip
     if y.nunique() < 2:
-        print(f"Skipping segment={segment_type}, mode={mode}, max_depth={max_depth}: only one class present.")
+        print(f"Skipping segment={segment_type}, mode={mode}, max_depth={max_depth}, use_v2={use_v2}: only one class present.")
         return
     X_train, X_test, y_train, y_test = split_data(X, y)
     clf = train_xgboost(X_train, y_train, max_depth)
     class_names = [f'not {mode}', f'{mode} (not preselected)']
     
-    # Define directories
+    # Create directory names with data version suffix
+    data_suffix = "_v2" if use_v2 else ""
     base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
-    plots_dir = base_path / f'plots/xg_boost/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
-    reports_dir = base_path / f'reports/xg_boost/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
-    models_dir = base_path / f'models/xg_boost/all_features/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    plots_dir = base_path / f'plots/xg_boost/all_features{data_suffix}/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    reports_dir = base_path / f'reports/xg_boost/all_features{data_suffix}/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
+    models_dir = base_path / f'models/xg_boost/all_features{data_suffix}/segment_{segment_type}/mode_{mode}/max_depth_{max_depth}'
     
     # Save model, evaluate, and create plots
     save_model(clf, models_dir)
     evaluate_model(clf, X_test, y_test, class_names, reports_dir)
     plot_feature_importance(clf, X, plots_dir)
 
-def main(mode_list, max_depth_list, segment_type_list):
+def main(mode_list, max_depth_list, segment_type_list, use_v2=False):
     print(f"Training XGBoost models for segments: {segment_type_list}")
     print(f"Modes: {mode_list}")
     print(f"Max depths: {max_depth_list}")
+    print(f"Using {'V2' if use_v2 else 'original'} data")
     print("="*60)
     
     # Load data once
     print("Loading data...")
-    df = load_parquet_data()
+    df = load_parquet_data(use_v2)
     df = add_churned_indicator(df)
+    # Select one row per purchase_session_id arbitrarily
+
+    if use_v2:
+        assert 'rider_lyft_id' in df.columns, f"rider_lyft_id should be in columns when use_v2=True, but not found. Available columns: {[col for col in df.columns if 'session' in col]}"
+        print(f"Verified: rider_session_id is in columns for V2 data")
+
+    df = df.drop_duplicates(subset=['purchase_session_id'], keep='first')
+    print(f"After deduplication: {len(df)} rows")
+    # Assert that we have exactly 1 row per purchase_session_id
+    assert df['purchase_session_id'].nunique() == len(df), f"Expected 1 row per purchase_session_id, but got {len(df)} rows for {df['purchase_session_id'].nunique()} unique purchase_session_ids"
+    print(f"Verified: {len(df)} rows with {df['purchase_session_id'].nunique()} unique purchase_session_ids")
+
     df.drop(columns=CATEGORICAL_COLS_TO_DROP, inplace=True)
+    # Assert that rider_session_id is not in columns
+    assert 'rider_lyft_id' not in df.columns, f"rider_lyft_id should not be in columns, but found: {[col for col in df.columns if 'rider_lyft_id' in col]}"
+    print(f"Verified: rider_lyft_id not in columns")
     
     # Process each segment type
     for segment_type in segment_type_list:
@@ -256,10 +271,11 @@ def main(mode_list, max_depth_list, segment_type_list):
         print(f"Segment data shape: {df_segment.shape}")
         
         # Create base directories
+        data_suffix = "_v2" if use_v2 else ""
         base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
-        (base_path / 'models/xg_boost/all_features').mkdir(exist_ok=True, parents=True)
-        (base_path / 'plots/xg_boost/all_features').mkdir(exist_ok=True, parents=True)
-        (base_path / 'reports/xg_boost/all_features').mkdir(exist_ok=True, parents=True)
+        (base_path / f'models/xg_boost/all_features{data_suffix}').mkdir(exist_ok=True, parents=True)
+        (base_path / f'plots/xg_boost/all_features{data_suffix}').mkdir(exist_ok=True, parents=True)
+        (base_path / f'reports/xg_boost/all_features{data_suffix}').mkdir(exist_ok=True, parents=True)
         
         # Parallelize using ProcessPoolExecutor
         tasks = []
@@ -268,7 +284,7 @@ def main(mode_list, max_depth_list, segment_type_list):
                 for mode in mode_list:
                     tasks.append(executor.submit(
                         run_for_mode_and_depth, 
-                        df_segment, mode, max_depth, segment_type
+                        df_segment, mode, max_depth, segment_type, use_v2
                     ))
             
             # Process results with better error handling
@@ -282,9 +298,9 @@ def main(mode_list, max_depth_list, segment_type_list):
         
         print(f"\nTraining completed for segment: {segment_type}")
         print(f"Results saved to:")
-        print(f"  - Models: {base_path}/models/xg_boost/all_features/segment_{segment_type}/")
-        print(f"  - Plots: {base_path}/plots/xg_boost/all_features/segment_{segment_type}/")
-        print(f"  - Reports: {base_path}/reports/xg_boost/all_features/segment_{segment_type}/")
+        print(f"  - Models: {base_path}/models/xg_boost/all_features{data_suffix}/segment_{segment_type}/")
+        print(f"  - Plots: {base_path}/plots/xg_boost/all_features{data_suffix}/segment_{segment_type}/")
+        print(f"  - Reports: {base_path}/reports/xg_boost/all_features{data_suffix}/segment_{segment_type}/")
 
 if __name__ == "__main__":
     # Configuration
@@ -295,4 +311,7 @@ if __name__ == "__main__":
     
     mode_list = ['fastpass', 'standard', 'premium', 'plus', 'lux', 'luxsuv']
     
-    main(mode_list, max_depth_list, segment_type_list) 
+    # Set to True to use V2 data, False for original data
+    use_v2 = True
+    
+    main(mode_list, max_depth_list, segment_type_list, use_v2) 

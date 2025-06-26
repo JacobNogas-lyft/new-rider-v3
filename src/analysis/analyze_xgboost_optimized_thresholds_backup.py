@@ -64,137 +64,176 @@ def filter_by_segment(df, segment_type):
     
     return filtered_df
 
-def prepare_features_target_and_rider_id(df, mode):
+def prepare_features_and_target(df, mode):
+    """Prepare features and target for a specific mode (copied from training script)."""
     df['target_diff_mode'] = ((df['requested_ride_type'] != df['preselected_mode']) & (df['requested_ride_type'] == mode)).astype(int)
+    
+    # Add percentage features for lifetime rides
     print("Creating percentage features for lifetime rides...")
+    
+    # Handle division by zero by replacing 0 with NaN, then filling with 0
     df['percent_rides_standard_lifetime'] = (
         df['rides_standard_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
     ).fillna(0)
+    
     df['percent_rides_premium_lifetime'] = (
         df['rides_premium_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
     ).fillna(0)
+    
     df['percent_rides_plus_lifetime'] = (
         df['rides_plus_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
     ).fillna(0)
+    
+    # Categorical columns to drop (high cardinality features that cause memory issues)
     CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
                                 'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id']
+    
     drop_cols = ['target_diff_mode', 'requested_ride_type', 'preselected_mode']
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    # Ensure rider_lyft_id is not included in features
-    feature_cols = [col for col in numeric_cols if col not in drop_cols and col != 'rider_lyft_id'] + [col for col in categorical_cols if (col not in drop_cols) and (col not in CATEGORICAL_COLS_TO_DROP) and col != 'rider_lyft_id']
+    
+    # Use all categorical columns except the high cardinality ones
+    feature_cols = [col for col in numeric_cols if col not in drop_cols] + [col for col in categorical_cols if (col not in drop_cols) and (col not in CATEGORICAL_COLS_TO_DROP)]
     X = df[feature_cols]
     y = df['target_diff_mode']
-    # Keep rider_lyft_id for later analysis
-    rider_ids = df['rider_lyft_id'].values if 'rider_lyft_id' in df.columns else np.array([None]*len(df))
+    
     print(f"Before get_dummies - X shape: {X.shape}")
     X = pd.get_dummies(X, drop_first=True)
     print(f"After get_dummies - X shape: {X.shape}")
     print("Data loaded and processed.")
-    return X, y, rider_ids
+    return X, y
 
-def load_or_create_test_data_for_model(df, segment_type, mode, use_v2=False):
-    data_suffix = "_v2" if use_v2 else ""
+def load_or_create_test_data_for_model(df, segment_type, mode):
+    """Load test data from cache or create and save it for a specific model."""
     cache_key = f"test_data_{segment_type}_{mode}"
-    cache_file = f'/home/sagemaker-user/studio/src/new-rider-v3/data{data_suffix}/{cache_key}.joblib'
+    cache_file = f'../data/{cache_key}.joblib'
+    
     if os.path.exists(cache_file):
-        print(f"Loading cached test data for {cache_key} (V2={use_v2})...")
+        print(f"Loading cached test data for {cache_key}...")
         try:
             cached_data = joblib.load(cache_file)
-            X_test, y_test, rider_ids_test = cached_data
+            X_test, y_test = cached_data
             print(f"✅ Loaded cached test data - Test: {X_test.shape}")
-            return X_test, y_test, rider_ids_test
+            return X_test, y_test
         except Exception as e:
             print(f"Error loading cached data: {e}")
             print("Will recreate test data...")
+    
+    # Only load/process the full dataset if cache does not exist
     if df is None:
         print(f"Loading full dataset from S3 to create test data for {cache_key}...")
         from utils.load_data import load_parquet_data
-        df = load_parquet_data(use_v2)
+        df = load_parquet_data()
         df = add_churned_indicator(df)
-    print(f"Creating test data for {cache_key} (V2={use_v2})...")
+    
+    print(f"Creating test data for {cache_key}...")
+    
+    # Filter data for this segment
     df_segment = filter_by_segment(df, segment_type)
+    
+    # Filter out rows with missing required columns
     required_cols = ['requested_ride_type', 'preselected_mode']
     df_segment = df_segment.dropna(subset=required_cols)
-    X, y, rider_ids = prepare_features_target_and_rider_id(df_segment, mode)
-    X_train, X_test, y_train, y_test, rider_ids_train, rider_ids_test = train_test_split(
-        X, y, rider_ids, test_size=0.2, random_state=42, stratify=y
+    
+    # Prepare features and target
+    X, y = prepare_features_and_target(df_segment, mode)
+    
+    # Split data (same as training)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
     )
-    cache_dir = f'/home/sagemaker-user/studio/src/new-rider-v3/data{data_suffix}'
-    Path(cache_dir).mkdir(exist_ok=True, parents=True)
+    
+    # Save test data to cache
     print(f"Saving test data to cache: {cache_file}")
-    joblib.dump((X_test, y_test, rider_ids_test), cache_file)
+    Path('../data').mkdir(exist_ok=True)
+    joblib.dump((X_test, y_test), cache_file)
+    
     print(f"✅ Created and cached test data - Test: {X_test.shape}")
     print(f"Test class distribution: {dict(zip(*np.unique(y_test, return_counts=True)))}")
-    return X_test, y_test, rider_ids_test
+    
+    return X_test, y_test
 
-def load_model_and_data(model_path, df=None, use_v2=False):
+def load_model_and_data(model_path, df=None):
+    """Load a trained XGBoost model and prepare data for threshold optimization."""
     try:
+        # Load the model
         model = joblib.load(model_path)
         print(f"Model loaded from: {model_path}")
+        
+        # Extract segment and mode from path
         path_parts = model_path.split(os.sep)
         segment = None
         mode = None
+        
         for part in path_parts:
             if part.startswith('segment_'):
                 segment = part.replace('segment_', '')
             elif part.startswith('mode_'):
                 mode = part.replace('mode_', '')
+        
         if not segment or not mode:
             raise ValueError(f"Could not extract segment and mode from path: {model_path}")
-        X_test, y_test, rider_ids_test = load_or_create_test_data_for_model(df, segment, mode, use_v2)
-        return model, X_test, y_test, rider_ids_test
+        
+        # Load cached test data for this specific model
+        X_test, y_test = load_or_create_test_data_for_model(df, segment, mode)
+        
+        return model, X_test, y_test
+        
     except Exception as e:
         print(f"Error loading model or data: {e}")
-        return None, None, None, None
+        return None, None, None
 
-def find_optimal_threshold(model, X_test, y_test, rider_ids_test):
+def find_optimal_threshold(model, X_test, y_test):
+    """Find optimal threshold for maximum F1 score (balance of precision and recall)."""
     print("Getting predictions on test data...")
     test_probs = model.predict_proba(X_test)[:, 1]
+    
     print("Finding optimal threshold for maximum F1 score...")
     thresholds = np.arange(0.1, 0.95, 0.01)
     best_f1 = 0
     best_threshold = 0.5
     best_precision = 0
     best_recall = 0
-    best_rider_count = 0
+    
     for threshold in thresholds:
         test_preds = (test_probs >= threshold).astype(int)
         precision = precision_score(y_test, test_preds, zero_division=0)
         recall = recall_score(y_test, test_preds, zero_division=0)
         f1 = f1_score(y_test, test_preds, zero_division=0)
-        if rider_ids_test is not None:
-            unique_riders = len(set(rider_ids_test[test_preds == 1]))
-        else:
-            unique_riders = 0
+        
         if f1 > best_f1:
             best_f1 = f1
             best_threshold = threshold
             best_precision = precision
             best_recall = recall
-            best_rider_count = unique_riders
+    
     print(f"Optimal threshold: {best_threshold:.3f}")
     print(f"Test F1 with optimal threshold: {best_f1:.4f}")
     print(f"Test precision with optimal threshold: {best_precision:.4f}")
     print(f"Test recall with optimal threshold: {best_recall:.4f}")
-    print(f"Unique riders with positive prediction (optimal): {best_rider_count}")
+    
+    # Get test predictions with both thresholds
+    print("Getting predictions on test data...")
+    
+    # Default threshold (0.5)
     default_preds = (test_probs >= 0.5).astype(int)
     default_precision = precision_score(y_test, default_preds, zero_division=0)
     default_recall = recall_score(y_test, default_preds, zero_division=0)
     default_f1 = f1_score(y_test, default_preds, zero_division=0)
     default_accuracy = accuracy_score(y_test, default_preds)
-    if rider_ids_test is not None:
-        default_rider_count = len(set(rider_ids_test[default_preds == 1]))
-    else:
-        default_rider_count = 0
+    
+    # Optimal threshold
     optimal_preds = (test_probs >= best_threshold).astype(int)
     optimal_precision = precision_score(y_test, optimal_preds, zero_division=0)
     optimal_recall = recall_score(y_test, optimal_preds, zero_division=0)
     optimal_f1 = f1_score(y_test, optimal_preds, zero_division=0)
     optimal_accuracy = accuracy_score(y_test, optimal_preds)
+    
+    # Calculate prediction distributions
     default_positive_preds = np.sum(default_preds)
     optimal_positive_preds = np.sum(optimal_preds)
     total_samples = len(y_test)
+    
     results = {
         'optimal_threshold': best_threshold,
         'default_precision': default_precision,
@@ -211,70 +250,38 @@ def find_optimal_threshold(model, X_test, y_test, rider_ids_test):
         'default_positive_ratio': (default_positive_preds / total_samples) * 100,
         'optimal_positive_ratio': (optimal_positive_preds / total_samples) * 100,
         'test_support_positive': np.sum(y_test),
-        'test_support_negative': np.sum(y_test == 0),
-        'unique_riders_optimal': best_rider_count,
-        'unique_riders_default': default_rider_count
+        'test_support_negative': np.sum(y_test == 0)
     }
+    
     return results
 
-def analyze_all_models_with_optimization(use_v2=False):
+def analyze_all_models_with_optimization():
+    """Analyze all XGBoost models with threshold optimization."""
     all_results = []
     
-    # Determine the base path based on use_v2 flag
-    data_suffix = "_v2" if use_v2 else ""
-    base_models_path = f'/home/sagemaker-user/studio/src/new-rider-v3/models/xg_boost/all_features{data_suffix}'
+    # Only load the full dataset if needed (pass None to load_model_and_data)
+    df = None
     
-    print(f"Analyzing models from: {base_models_path}")
-    
-    # Check if directory exists
-    if not os.path.exists(base_models_path):
-        print(f"ERROR: Directory {base_models_path} does not exist!")
-        return pd.DataFrame(all_results)
-    
-    # Load data once at the beginning (following training script pattern)
-    print("Loading data once for all analysis...")
-    from utils.load_data import load_parquet_data
-    df = load_parquet_data(use_v2)
-    df = add_churned_indicator(df)
-    
-    # Apply the same preprocessing as training script
-    if use_v2:
-        assert 'rider_lyft_id' in df.columns, f"rider_lyft_id should be in columns when use_v2=True, but not found. Available columns: {[col for col in df.columns if 'session' in col]}"
-        print(f"Verified: rider_lyft_id is in columns for V2 data")
-
-    df = df.drop_duplicates(subset=['purchase_session_id'], keep='first')
-    print(f"After deduplication: {len(df)} rows")
-    
-    # Assert that we have exactly 1 row per purchase_session_id
-    assert df['purchase_session_id'].nunique() == len(df), f"Expected 1 row per purchase_session_id, but got {len(df)} rows for {df['purchase_session_id'].nunique()} unique purchase_session_ids"
-    print(f"Verified: {len(df)} rows with {df['purchase_session_id'].nunique()} unique purchase_session_ids")
-
-    CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
-                                'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id']
-    df.drop(columns=CATEGORICAL_COLS_TO_DROP, inplace=True)
-    
-    # Note: rider_lyft_id is kept for rider counting functionality
-    print(f"Verified: rider_lyft_id kept for analysis")
-    
-    segment_models = {}
-    for root, _, files in os.walk(base_models_path):
+    # Walk through the models directory
+    for root, _, files in os.walk('../models'):
         for file in files:
             if file != 'xgboost_model.joblib':
                 continue
+            
             file_path = os.path.join(root, file)
+            
+            # Extract segment and mode from path
             path_parts = file_path.split(os.sep)
             
-            # Check if this is an XGBoost model with max_depth_10 and all_features
-            xg_boost_found = any('xg_boost' in part for part in path_parts)
-            max_depth_found = any('max_depth_10' in part for part in path_parts)
-            all_features_found = any('all_features' in part for part in path_parts)
-            
-            if not xg_boost_found or not max_depth_found or not all_features_found:
+            # Skip if not an XGBoost model with max_depth_10 and all_features
+            if 'xg_boost' not in path_parts or 'max_depth_10' not in path_parts or 'all_features' not in path_parts:
                 continue
-                
+            
+            # Extract segment and mode
             segment = None
             mode = None
             depth = None
+            
             for part in path_parts:
                 if part.startswith('segment_'):
                     segment = part.replace('segment_', '')
@@ -282,73 +289,57 @@ def analyze_all_models_with_optimization(use_v2=False):
                     mode = part.replace('mode_', '')
                 elif part.startswith('max_depth_'):
                     depth = part.replace('max_depth_', '')
+            
             if not all([segment, mode, depth]):
                 continue
-            if segment not in segment_models:
-                segment_models[segment] = []
-            segment_models[segment].append((file_path, mode, int(depth)))
-    
-    global_rider_set = set()
-    for segment_type, models in segment_models.items():
-        print(f"\n{'='*60}")
-        print(f"Processing segment: {segment_type}")
-        print(f"{'='*60}")
-        
-        # Filter data for this segment (following training script pattern)
-        df_segment = filter_by_segment(df, segment_type)
-        required_cols = ['requested_ride_type', 'preselected_mode']
-        df_segment = df_segment.dropna(subset=required_cols)
-        print(f"Segment data shape: {df_segment.shape}")
-        
-        for i, (file_path, mode, depth) in enumerate(models):
+            
             print(f"\n{'='*60}")
-            print(f"Analyzing: {segment_type}/{mode} (max_depth={depth})")
+            print(f"Analyzing: {segment}/{mode} (max_depth={depth})")
             print(f"{'='*60}")
+            
             try:
-                model, X_test, y_test, rider_ids_test = load_model_and_data(file_path, df_segment, use_v2)
+                # Only load the full dataset if cache does not exist
+                model, X_test, y_test = load_model_and_data(file_path, df)
+                
                 if model is None:
                     print(f"Skipping {file_path} due to loading error")
                     continue
-                if segment_type == 'all' and i == 0 and rider_ids_test is not None:
-                    global_rider_set = set(rider_ids_test)
-                    print(f"Global unique riders in 'all' segment test set: {len(global_rider_set)}")
-                results = find_optimal_threshold(model, X_test, y_test, rider_ids_test)
+                
+                # Perform threshold optimization
+                results = find_optimal_threshold(model, X_test, y_test)
+                
+                # Add metadata
                 results.update({
-                    'segment': segment_type,
+                    'segment': segment,
                     'mode': mode,
-                    'max_depth': depth,
-                    'model_path': file_path,
-                    'data_version': 'V2' if use_v2 else 'Original',
-                    'rider_ids_test': rider_ids_test
+                    'max_depth': int(depth),
+                    'model_path': file_path
                 })
+                
                 all_results.append(results)
-                print(f"✅ Completed analysis for {segment_type}/{mode}")
+                
+                print(f"✅ Completed analysis for {segment}/{mode}")
+                
             except Exception as e:
                 print(f"❌ Error analyzing {file_path}: {e}")
                 continue
     
-    if len(all_results) > 0:
-        df_results = pd.DataFrame(all_results)
-        global_rider_count = len(global_rider_set)
-        print(f"Global denominator for all heatmap cells: {global_rider_count}")
-        df_results['total_unique_riders'] = global_rider_count
-        df_results['pct_riders_positive_optimal'] = df_results['unique_riders_optimal'] / global_rider_count
-        df_results['pct_riders_positive_default'] = df_results['unique_riders_default'] / global_rider_count
-        return df_results
-    else:
-        return pd.DataFrame(all_results)
+    return pd.DataFrame(all_results)
 
-def create_optimized_analysis_plots(df, use_v2=False):
+def create_optimized_analysis_plots(df):
+    """Create visualization plots for the optimized threshold analysis."""
+    
+    # Set up the plotting style
     plt.style.use('default')
     sns.set_palette("YlGn")
+    
+    # Set a common color scale for all heatmaps except support
     vmin, vmax = 0, 1
     
-    # Add data version to title
-    data_version = "V2" if use_v2 else "Original"
-    
-    fig, axes = plt.subplots(5, 3, figsize=(24, 30))
-    fig.suptitle(f'XGBoost Model Performance: Optimized vs Default Thresholds - {data_version} Data', fontsize=16, fontweight='bold')
-    
+    # Create a figure with multiple subplots (4 rows, 3 columns)
+    fig, axes = plt.subplots(4, 3, figsize=(24, 26))
+    fig.suptitle('XGBoost Model Performance: Optimized vs Default Thresholds', fontsize=16, fontweight='bold')
+
     # Row 1: Default Threshold Performance
     # 1. Default Precision heatmap
     ax1 = axes[0, 0]
@@ -409,47 +400,36 @@ def create_optimized_analysis_plots(df, use_v2=False):
     ax9.set_title('Optimal Threshold Values')
 
     # Row 4: Positive Prediction Ratios (relative to total samples)
-    total_samples = 122925
+    total_samples = 122925  # Always use the global total
+    # 10. Default Positive Prediction Ratio heatmap (global denominator)
     ax10 = axes[3, 0]
     pivot_default_pos_count = df.pivot_table(index='mode', columns='segment', values='default_positive_preds', aggfunc='mean')
     pivot_default_pos_ratio_global = (pivot_default_pos_count / total_samples) * 100
     annot_default = pivot_default_pos_ratio_global.round(2).astype(str) + '% (' + pivot_default_pos_count.round(0).astype(int).astype(str) + ')'
     sns.heatmap(pivot_default_pos_ratio_global, annot=annot_default, fmt='', cmap='YlGn', ax=ax10, vmin=0, vmax=100)
     ax10.set_title('Default Threshold - % Predicted Positive (Global)')
+    
+    # 11. Optimized Positive Prediction Ratio heatmap (global denominator)
     ax11 = axes[3, 1]
     pivot_optimal_pos_count = df.pivot_table(index='mode', columns='segment', values='optimal_positive_preds', aggfunc='mean')
     pivot_optimal_pos_ratio_global = (pivot_optimal_pos_count / total_samples) * 100
     annot_optimal = pivot_optimal_pos_ratio_global.round(2).astype(str) + '% (' + pivot_optimal_pos_count.round(0).astype(int).astype(str) + ')'
     sns.heatmap(pivot_optimal_pos_ratio_global, annot=annot_optimal, fmt='', cmap='YlGn', ax=ax11, vmin=0, vmax=100)
     ax11.set_title('Optimized Threshold - % Predicted Positive (Global)')
-    # 5. Percentage of riders receiving a positive prediction (default threshold)
-    ax12 = axes[3, 2]
-    pct_riders_default = df.pivot_table(index='mode', columns='segment', values='pct_riders_positive_default', aggfunc='mean')
-    sns.heatmap(pct_riders_default, annot=True, fmt='.2%', cmap='YlGn', ax=ax12, vmin=0, vmax=1)
-    ax12.set_title('% Riders w/ Positive Prediction (Default)')
-    # 6. Percentage of riders receiving a positive prediction (optimal threshold)
-    ax13 = axes[4, 0]
-    pct_riders_optimal = df.pivot_table(index='mode', columns='segment', values='pct_riders_positive_optimal', aggfunc='mean')
-    sns.heatmap(pct_riders_optimal, annot=True, fmt='.2%', cmap='YlGn', ax=ax13, vmin=0, vmax=1)
-    ax13.set_title('% Riders w/ Positive Prediction (Optimal)')
-    # Hide unused subplots
-    ax14 = axes[4, 1]
-    ax14.axis('off')
-    ax15 = axes[4, 2]
-    ax15.axis('off')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
     
-    # Save with data version suffix
-    data_suffix = "_v2" if use_v2 else ""
-    plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_xgboost{data_suffix}.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_xgboost{data_suffix}.png', dpi=300, bbox_inches='tight')
+    # 12. Empty plot (for layout)
+    ax12 = axes[3, 2]
+    ax12.axis('off')
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig('../plots/optimized_threshold_analysis_summary_xgboost.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig('../plots/optimized_threshold_analysis_summary_xgboost.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def print_optimized_analysis(df, use_v2=False):
-    data_version = "V2" if use_v2 else "Original"
-    
+def print_optimized_analysis(df):
+    """Print detailed analysis of the optimized threshold results."""
     print("=" * 80)
-    print(f"XGBOOST OPTIMIZED THRESHOLD ANALYSIS - {data_version} DATA")
+    print("XGBOOST OPTIMIZED THRESHOLD ANALYSIS")
     print("=" * 80)
     
     print(f"\nTotal models analyzed: {len(df)}")
@@ -569,24 +549,14 @@ def print_optimized_analysis(df, use_v2=False):
     print("  - Consider implementing threshold optimization in production models")
 
 if __name__ == "__main__":
-    # Set to True to analyze V2 data, False for original data
-    use_v2 = True
-    
-    Path('/home/sagemaker-user/studio/src/new-rider-v3/plots').mkdir(exist_ok=True, parents=True)
+    Path('../plots').mkdir(exist_ok=True)
     print("Starting XGBoost model analysis with threshold optimization...")
-    df = analyze_all_models_with_optimization(use_v2)
+    df = analyze_all_models_with_optimization()
     if len(df) > 0:
-        print_optimized_analysis(df, use_v2)
-        create_optimized_analysis_plots(df, use_v2)
-        
-        # Save the analysis to CSV with data version suffix
-        data_suffix = "_v2" if use_v2 else ""
-        csv_path = f'/home/sagemaker-user/studio/src/new-rider-v3/reports/optimized_threshold_analysis_summary_xgboost{data_suffix}.csv'
-        df.to_csv(csv_path, index=False)
-        print(f"\n📊 Analysis saved to '{csv_path}'")
-        
-        plot_suffix = "_v2" if use_v2 else ""
-        print(f"📈 Plots saved to '/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_xgboost{plot_suffix}.pdf' and '.png'")
+        print_optimized_analysis(df)
+        create_optimized_analysis_plots(df)
+        df.to_csv('../reports/optimized_threshold_analysis_summary_xgboost.csv', index=False)
+        print(f"\n📊 Analysis saved to '../reports/optimized_threshold_analysis_summary_xgboost.csv'")
+        print(f"📈 Plots saved to '../plots/optimized_threshold_analysis_summary_xgboost.pdf' and '../plots/optimized_threshold_analysis_summary_xgboost.png'")
     else:
-        data_version = "V2" if use_v2 else "original"
-        print(f"No XGBoost models found to analyze for {data_version} data.") 
+        print("No XGBoost models found to analyze.") 

@@ -47,23 +47,44 @@ def parse_classification_report(file_path):
     
     return results
 
-def analyze_all_reports():
+def analyze_all_reports(use_v2=False):
     """Analyze all decision tree classification reports in the reports directory."""
     all_results = []
     
+    # Determine the base path based on use_v2 flag
+    data_suffix = "_v2" if use_v2 else ""
+    base_reports_path = f'/home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree/all_features{data_suffix}'
+    
+    print(f"Analyzing reports from: {base_reports_path}")
+    
+    # Check if directory exists
+    if not os.path.exists(base_reports_path):
+        print(f"ERROR: Directory {base_reports_path} does not exist!")
+        return pd.DataFrame(all_results)
+    
     # Walk through the reports directory
-    for root, _, files in os.walk('../reports/decision_tree'):
+    files_found = 0
+    files_processed = 0
+    
+    for root, _, files in os.walk(base_reports_path):
         for file in files:
             if file != 'classification_report.txt':
                 continue
             
+            files_found += 1
             file_path = os.path.join(root, file)
             
             # Extract segment and mode from path
             path_parts = file_path.split(os.sep)
             
-            # Only include reports in all_features directory
-            if 'all_features' not in path_parts:
+            # Only include reports in all_features directory (with or without _v2 suffix)
+            all_features_found = False
+            for part in path_parts:
+                if 'all_features' in part:
+                    all_features_found = True
+                    break
+            
+            if not all_features_found:
                 continue
             
             # Extract segment, mode, and depth
@@ -128,15 +149,19 @@ def analyze_all_reports():
                         'recall': positive_metrics['recall'],
                         'f1_score': positive_metrics['f1_score'],
                         'support': positive_metrics['support'],
-                        'accuracy': results.get('overall_accuracy', np.nan)
+                        'accuracy': results.get('overall_accuracy', np.nan),
+                        'data_version': 'V2' if use_v2 else 'Original'
                     })
+                    
+                    files_processed += 1
                     
             except Exception as e:
                 print(f"Error parsing {file_path}: {e}")
     
+    print(f"Found {files_found} files, processed {files_processed} files")
     return pd.DataFrame(all_results)
 
-def create_analysis_plots(df):
+def create_analysis_plots(df, use_v2=False):
     """Create visualization plots for the decision tree analysis focusing on positive class metrics."""
     
     # Set up the plotting style
@@ -148,7 +173,10 @@ def create_analysis_plots(df):
     
     # Create a figure with multiple subplots
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle('Decision Tree Model Performance Analysis (Max Depth 10) - Positive Class Metrics', fontsize=16, fontweight='bold')
+    
+    # Add data version to title
+    data_version = "V2" if use_v2 else "Original"
+    fig.suptitle(f'Decision Tree Model Performance Analysis (Max Depth 10) - Positive Class Metrics - {data_version} Data', fontsize=16, fontweight='bold')
     
     # 1. Precision heatmap
     ax1 = axes[0, 0]
@@ -175,17 +203,23 @@ def create_analysis_plots(df):
     ax4.set_title('Positive Class Support by Mode and Segment')
     
     plt.tight_layout()
-    plt.savefig('../plots/decision_tree_max_depth_10_analysis_summary.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('../plots/decision_tree_max_depth_10_analysis_summary.png', dpi=300, bbox_inches='tight')
+    
+    # Save with data version suffix
+    data_suffix = "_v2" if use_v2 else ""
+    plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree_max_depth_10_analysis_summary{data_suffix}.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree_max_depth_10_analysis_summary{data_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def print_detailed_analysis(df):
+def print_detailed_analysis(df, use_v2=False):
     """Print detailed analysis of the decision tree results focusing on positive class metrics."""
+    data_version = "V2" if use_v2 else "Original"
+    
     print("=" * 80)
-    print("DECISION TREE CLASSIFICATION MODEL ANALYSIS (MAX DEPTH 10) - POSITIVE CLASS METRICS")
+    print(f"DECISION TREE CLASSIFICATION MODEL ANALYSIS (MAX DEPTH 10) - POSITIVE CLASS METRICS - {data_version} DATA")
     print("=" * 80)
     
     print(f"\nTotal models analyzed: {len(df)}")
+    print(f"Data version: {data_version}")
     print(f"Segments: {df['segment'].unique()}")
     print(f"Modes: {df['mode'].unique()}")
     print(f"Max depth: 10 (filtered)")
@@ -349,19 +383,27 @@ def print_detailed_analysis(df):
                 print("    Focus on churned rider-specific features and patterns.")
 
 if __name__ == "__main__":
+    # Set to True to analyze V2 data, False for original data
+    use_v2 = True
+    
     # Create plots directory if it doesn't exist
-    Path('plots').mkdir(exist_ok=True)
+    Path('/home/sagemaker-user/studio/src/new-rider-v3/plots').mkdir(exist_ok=True, parents=True)
     
     # Analyze all reports
-    df = analyze_all_reports()
+    df = analyze_all_reports(use_v2)
     
     if len(df) > 0:
-        print_detailed_analysis(df)
-        create_analysis_plots(df)
+        print_detailed_analysis(df, use_v2)
+        create_analysis_plots(df, use_v2)
         
-        # Save the analysis to CSV
-        df.to_csv('../reports/decision_tree_analysis_summary.csv', index=False)
-        print(f"\n📊 Analysis saved to '../reports/decision_tree_analysis_summary.csv'")
-        print(f"📈 Plots saved to '../plots/decision_tree_max_depth_10_analysis_summary.pdf' and '.png'")
+        # Save the analysis to CSV with data version suffix
+        data_suffix = "_v2" if use_v2 else ""
+        csv_path = f'/home/sagemaker-user/studio/src/new-rider-v3/reports/decision_tree_analysis_summary{data_suffix}.csv'
+        df.to_csv(csv_path, index=False)
+        print(f"\n📊 Analysis saved to '{csv_path}'")
+        
+        plot_suffix = "_v2" if use_v2 else ""
+        print(f"📈 Plots saved to '/home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree_max_depth_10_analysis_summary{plot_suffix}.pdf' and '.png'")
     else:
-        print("No decision tree classification reports found to analyze.") 
+        data_version = "V2" if use_v2 else "original"
+        print(f"No decision tree classification reports found to analyze for {data_version} data.") 

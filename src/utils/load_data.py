@@ -10,16 +10,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants
-#S3_BASE_PATH = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_f25b3c89-a634-421a-90fe-dc1df09a0098'
-#S3_BASE_PATH = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_f25b3c89-a634-421a-90fe-dc1df09a0098'
-S3_BASE_PATH = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v2_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_5dbd8727-c741-4645-a236-a7d702587ea1'
-EXTRACT_PATH = f"{S3_BASE_PATH}/extract"
+S3_BASE_PATH_ORIGINAL = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_f25b3c89-a634-421a-90fe-dc1df09a0098'
+S3_BASE_PATH_V2 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v2_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_5dbd8727-c741-4645-a236-a7d702587ea1'
+EXTRACT_PATH = f"{S3_BASE_PATH_ORIGINAL}/extract"
 
-def get_date_range():
+def get_date_range(s3_base_path):
     """Get the date range from the path name."""
     # Extract dates from the path
-    start_date = datetime.strptime(S3_BASE_PATH.split('_')[-3], '%Y-%m-%d')
-    end_date = datetime.strptime(S3_BASE_PATH.split('_')[-2], '%Y-%m-%d')
+    start_date = datetime.strptime(s3_base_path.split('_')[-3], '%Y-%m-%d')
+    end_date = datetime.strptime(s3_base_path.split('_')[-2], '%Y-%m-%d')
     return start_date, end_date
 
 def standardize_schema(table):
@@ -80,65 +79,80 @@ def safe_read_parquet(pq_file, filesystem):
         logger.error(f"Error in safe_read_parquet for {pq_file}: {str(e)}")
         raise
 
-def load_parquet_data():
+def load_parquet_data(use_v2=False):
     """Load and combine Parquet files from S3."""
-    logger.info("Initializing S3 filesystem...")
-    fs = s3fs.S3FileSystem()
+    # Choose the appropriate S3 base path
+    s3_base_path = S3_BASE_PATH_V2 if use_v2 else S3_BASE_PATH_ORIGINAL
+    extract_path = f"{s3_base_path}/extract"
     
-    # Get date range
-    start_date, end_date = get_date_range()
-    logger.info(f"Loading data from {start_date.date()} to {end_date.date()}")
+    logger.info(f"Loading {'V2' if use_v2 else 'original'} data from {s3_base_path}")
     
-    # Generate list of expected parquet files
-    current_date = start_date
-    parquet_files = []
-    
-    while current_date <= end_date:
-        date_str = current_date.strftime('%Y-%m-%d')
-        parquet_path = f"{EXTRACT_PATH}/{date_str}.parquet"
+    try:
+        # Try the pandas direct approach first (better for handling large integers)
+        logger.info("Attempting to load data using pandas direct approach...")
+        return load_parquet_data_pandas_direct(extract_path, s3_base_path)
+    except Exception as e:
+        logger.warning(f"Pandas direct approach failed: {str(e)}")
+        logger.info("Falling back to PyArrow approach...")
         
-        # Check if file exists
-        if fs.exists(parquet_path):
-            parquet_files.append(parquet_path)
-        else:
-            logger.warning(f"No data file found for date: {date_str}")
+        # Fall back to PyArrow approach
+        logger.info("Initializing S3 filesystem...")
+        fs = s3fs.S3FileSystem()
+        
+        # Get date range
+        start_date, end_date = get_date_range(s3_base_path)
+        logger.info(f"Loading data from {start_date.date()} to {end_date.date()}")
+        
+        # Generate list of expected parquet files
+        current_date = start_date
+        parquet_files = []
+        
+        while current_date <= end_date:
+            date_str = current_date.strftime('%Y-%m-%d')
+            parquet_path = f"{extract_path}/{date_str}.parquet"
             
-        current_date += timedelta(days=1)
-    
-    logger.info(f"Found {len(parquet_files)} parquet files")
-    
-    if not parquet_files:
-        raise ValueError("No parquet files found in the specified date range")
-    
-    # Read and combine
-    logger.info("Reading and combining parquet files...")
-    tables = []
-    for pq_file in parquet_files:
-        try:
-            table = safe_read_parquet(pq_file, fs)
-            tables.append(table)
-            logger.info(f"Successfully loaded and standardized {pq_file}")
-        except Exception as e:
-            logger.error(f"Error processing {pq_file}: {str(e)}")
-            raise
-    
-    if not tables:
-        raise ValueError("No tables were successfully loaded")
-    
-    combined_table = pa.concat_tables(tables)
-    
-    # Convert to pandas DataFrame for easier analysis
-    df = combined_table.to_pandas()
-    
-    return df
+            # Check if file exists
+            if fs.exists(parquet_path):
+                parquet_files.append(parquet_path)
+            else:
+                logger.warning(f"No data file found for date: {date_str}")
+                
+            current_date += timedelta(days=1)
+        
+        logger.info(f"Found {len(parquet_files)} parquet files")
+        
+        if not parquet_files:
+            raise ValueError("No parquet files found in the specified date range")
+        
+        # Read and combine
+        logger.info("Reading and combining parquet files...")
+        tables = []
+        for pq_file in parquet_files:
+            try:
+                table = safe_read_parquet(pq_file, fs)
+                tables.append(table)
+                logger.info(f"Successfully loaded and standardized {pq_file}")
+            except Exception as e:
+                logger.error(f"Error processing {pq_file}: {str(e)}")
+                raise
+        
+        if not tables:
+            raise ValueError("No tables were successfully loaded")
+        
+        combined_table = pa.concat_tables(tables)
+        
+        # Convert to pandas DataFrame for easier analysis
+        df = combined_table.to_pandas()
+        
+        return df
 
-def load_parquet_data_pandas_direct():
+def load_parquet_data_pandas_direct(extract_path, s3_base_path):
     """Alternative loading method using pandas directly with dtype specification."""
     logger.info("Initializing S3 filesystem...")
     fs = s3fs.S3FileSystem()
     
     # Get date range
-    start_date, end_date = get_date_range()
+    start_date, end_date = get_date_range(s3_base_path)
     logger.info(f"Loading data from {start_date.date()} to {end_date.date()}")
     
     # Generate list of expected parquet files
@@ -147,7 +161,7 @@ def load_parquet_data_pandas_direct():
     
     while current_date <= end_date:
         date_str = current_date.strftime('%Y-%m-%d')
-        parquet_path = f"{EXTRACT_PATH}/{date_str}.parquet"
+        parquet_path = f"{extract_path}/{date_str}.parquet"
         
         # Check if file exists
         if fs.exists(parquet_path):
@@ -170,14 +184,21 @@ def load_parquet_data_pandas_direct():
         try:
             # Use pandas to read with string_to_object=False to handle large integers
             with fs.open(pq_file, 'rb') as f:
-                df = pd.read_parquet(f, engine='pyarrow', dtype_backend='pyarrow')
+                df = pd.read_parquet(f, engine='pyarrow')
                 
                 # Convert any large integer columns to float64
                 for col in df.columns:
-                    if df[col].dtype == 'int64':
+                    if pd.api.types.is_integer_dtype(df[col]):
                         # Check if any values are outside safe range for JavaScript
-                        if df[col].max() > 9007199254740992 or df[col].min() < -9007199254740992:
-                            logger.info(f"Converting column {col} from int64 to float64 due to large values")
+                        try:
+                            col_max = df[col].max()
+                            col_min = df[col].min()
+                            if col_max > 9007199254740992 or col_min < -9007199254740992:
+                                logger.info(f"Converting column {col} from {df[col].dtype} to float64 due to large values")
+                                df[col] = df[col].astype('float64')
+                        except Exception:
+                            # If we can't check the range, convert to float64 anyway for safety
+                            logger.info(f"Converting column {col} from {df[col].dtype} to float64 for safety")
                             df[col] = df[col].astype('float64')
                 
                 dfs.append(df)

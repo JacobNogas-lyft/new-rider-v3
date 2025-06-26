@@ -18,9 +18,9 @@ def add_churned_indicator(df):
     df['is_churned_user'] = churned_mask.astype(int)
     return df
 
-def load_and_prepare_data():
+def load_and_prepare_data(use_v2=False):
     print("Loading and preparing data...")
-    df = load_parquet_data()
+    df = load_parquet_data(use_v2)
     df = add_churned_indicator(df)
     required_cols = ['requested_ride_type', 'preselected_mode']
     df = df.dropna(subset=required_cols)
@@ -107,8 +107,8 @@ def run_for_mode_and_depth(df, mode, max_depth):
     visualize_tree(clf, X, class_names, plots_dir, max_depth)
     plot_feature_importance(clf, X, plots_dir)
 
-def main(mode_list, max_depth_list):
-    df = load_and_prepare_data()
+def main(mode_list, max_depth_list, use_v2=False):
+    df = load_and_prepare_data(use_v2)
     # Parallelize using ProcessPoolExecutor
     tasks = []
     with ProcessPoolExecutor() as executor:
@@ -120,5 +120,5 @@ def main(mode_list, max_depth_list):
 
 if __name__ == "__main__":
     #main(mode_list=['fastpass', 'standard', 'premium', 'plus', 'lux', 'luxsuv'], max_depth_list=[3, 4, 5]) 
-    main(mode_list=['standard_saver'], max_depth_list=[3, 4, 5]) 
+    main(mode_list=['standard_saver'], max_depth_list=[3, 4, 5], use_v2=False)  # Set to True for V2 data
     #TODO run this, as want to see if its really just standard_saver that is the potentiol
