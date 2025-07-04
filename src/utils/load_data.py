@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 # Constants
 S3_BASE_PATH_ORIGINAL = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_f25b3c89-a634-421a-90fe-dc1df09a0098'
 S3_BASE_PATH_V2 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v2_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_5dbd8727-c741-4645-a236-a7d702587ea1'
+#S3_BASE_PATH_V3 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v3_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_728c89c7-1fc8-46c2-aa4b-f9f08ce9a384'
+S3_BASE_PATH_V3 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v3_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_19f1b346-bb03-4761-8eee-b9d09a88e843'
+
 EXTRACT_PATH = f"{S3_BASE_PATH_ORIGINAL}/extract"
 
 def get_date_range(s3_base_path):
@@ -79,13 +82,26 @@ def safe_read_parquet(pq_file, filesystem):
         logger.error(f"Error in safe_read_parquet for {pq_file}: {str(e)}")
         raise
 
-def load_parquet_data(use_v2=False):
-    """Load and combine Parquet files from S3."""
+def get_s3_base_path(data_version='original'):
+    """Get the appropriate S3 base path based on data version."""
+    if data_version == 'v2':
+        return S3_BASE_PATH_V2
+    elif data_version == 'v3':
+        return S3_BASE_PATH_V3
+    else:
+        return S3_BASE_PATH_ORIGINAL
+
+def load_parquet_data(data_version='original'):
+    """Load and combine Parquet files from S3.
+    
+    Args:
+        data_version (str): Data version to load. Options: 'original', 'v2', 'v3'
+    """
     # Choose the appropriate S3 base path
-    s3_base_path = S3_BASE_PATH_V2 if use_v2 else S3_BASE_PATH_ORIGINAL
+    s3_base_path = get_s3_base_path(data_version)
     extract_path = f"{s3_base_path}/extract"
     
-    logger.info(f"Loading {'V2' if use_v2 else 'original'} data from {s3_base_path}")
+    logger.info(f"Loading {data_version.upper()} data from {s3_base_path}")
     
     try:
         # Try the pandas direct approach first (better for handling large integers)

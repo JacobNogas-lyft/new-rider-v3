@@ -38,12 +38,18 @@ KEY_CATEGORICAL_COLS = [
     # Historical mode preferences
     'last_product_key', 'second_last_product_key', 'third_last_product_key',
     'fourth_last_product_key', 'fifth_last_product_key',
-    'favorite_product_key_28d', 'favorite_product_key_90d'
+    'favorite_product_key_28d', 'favorite_product_key_90d',
+    
+    # Airline feature (will be added during processing)
+    'airline'
 ]
 
 CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
                             'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id',
-                            'rider_lyft_id'
+                            'rider_lyft_id',
+                            'signup_at',
+                            'destination_place_name',
+                            'pickup_place_name'
                             ]#what is label?
                             #['bundle_set_id', 'rider_session_id', 'occurred_at', 'requested_at', 'candidate_product_keylabel']
 
@@ -65,6 +71,8 @@ def filter_by_segment(df, segment_type):
         df (pandas.DataFrame): Input dataframe
         segment_type (str): Type of segment to filter by
             - 'airport': Sessions where destination_venue_category = 'airport' or origin_venue_category = 'airport'
+            - 'airport_dropoff': Sessions where destination_venue_category = 'airport'
+            - 'airport_pickup': Sessions where origin_venue_category = 'airport'
             - 'churned': Sessions where rider is churned (is_churned_user = 1)
             - 'all': No filtering (use all data)
     
@@ -79,34 +87,32 @@ def filter_by_segment(df, segment_type):
         )
         filtered_df = df[airport_mask].copy()
         print(f"Airport sessions: {len(filtered_df)} rows (from {len(df)} total)")
-        
+    
+    elif segment_type == 'airport_dropoff':
+        airport_dropoff_mask = (df['destination_venue_category'] == 'airport')
+        filtered_df = df[airport_dropoff_mask].copy()
+        print(f"Airport dropoff sessions: {len(filtered_df)} rows (from {len(df)} total)")
+    
+    elif segment_type == 'airport_pickup':
+        airport_pickup_mask = (df['origin_venue_category'] == 'airport')
+        filtered_df = df[airport_pickup_mask].copy()
+        print(f"Airport pickup sessions: {len(filtered_df)} rows (from {len(df)} total)")
+    
     elif segment_type == 'churned':
         # Filter for churned riders
         churned_mask = (df['is_churned_user'] == 1)
         filtered_df = df[churned_mask].copy()
         print(f"Churned rider sessions: {len(filtered_df)} rows (from {len(df)} total)")
-        
+    
     elif segment_type == 'all':
         # No filtering
         filtered_df = df.copy()
         print(f"Using all data: {len(filtered_df)} rows")
-        
+    
     else:
-        raise ValueError(f"Unknown segment type: {segment_type}. Use 'airport', 'churned', or 'all'")
+        raise ValueError(f"Unknown segment type: {segment_type}. Use 'airport', 'airport_dropoff', 'airport_pickup', 'churned', or 'all'")
     
     return filtered_df
-
-def load_and_prepare_data(segment_type='all', use_v2=False):
-    print(f"Loading and preparing data for segment: {segment_type} (use_v2={use_v2})...")
-    df = load_parquet_data(use_v2)
-    df = add_churned_indicator(df)
-    
-    # Filter by segment
-    df = filter_by_segment(df, segment_type)
-    
-    required_cols = ['requested_ride_type', 'preselected_mode']
-    df = df.dropna(subset=required_cols)
-    return df
 
 def prepare_features_and_target(df, mode):
     df['target_diff_mode'] = ((df['requested_ride_type'] != df['preselected_mode']) & (df['requested_ride_type'] == mode)).astype(int)
@@ -241,13 +247,13 @@ def save_model(clf, models_dir):
     joblib.dump(clf, model_path)
     print(f"Saved model to {model_path}")
 
-def run_for_mode_and_depth(df, mode, max_depth, segment_type, use_v2=False):
-    print(f"\n=== Running for segment: {segment_type}, mode: {mode}, max_depth: {max_depth}, use_v2: {use_v2} ===")
+def run_for_mode_and_depth(df, mode, max_depth, segment_type, data_version='original'):
+    print(f"\n=== Running for segment: {segment_type}, mode: {mode}, max_depth: {max_depth}, data_version: {data_version} ===")
     
     X, y, feature_cols = prepare_features_and_target(df, mode)
     # If only one class, skip
     if y.nunique() < 2:
-        print(f"Skipping segment={segment_type}, mode={mode}, max_depth={max_depth}, use_v2={use_v2}: only one class present.")
+        print(f"Skipping segment={segment_type}, mode={mode}, max_depth={max_depth}, data_version={data_version}: only one class present.")
         return
     X_train, X_test, y_train, y_test = split_data(X, y)
     clf = train_decision_tree(X_train, y_train, max_depth)
@@ -255,7 +261,7 @@ def run_for_mode_and_depth(df, mode, max_depth, segment_type, use_v2=False):
     
     # Create directory names with data version suffix
     max_depth_str = str(max_depth) if max_depth is not None else "unbounded"
-    data_suffix = "_v2" if use_v2 else ""
+    data_suffix = f"_{data_version}" if data_version != 'original' else ""
     base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
     plots_dir = base_path / f'plots/decision_tree/all_features{data_suffix}/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
     reports_dir = base_path / f'reports/decision_tree/all_features{data_suffix}/segment_{segment_type}/mode_{mode}/max_depth_{max_depth_str}'
@@ -266,22 +272,24 @@ def run_for_mode_and_depth(df, mode, max_depth, segment_type, use_v2=False):
     plot_feature_importance(clf, X, plots_dir)
     save_model(clf, models_dir)
 
-def main(mode_list, max_depth_list, segment_type_list, use_v2=False):
+def main(mode_list, max_depth_list, segment_type_list, data_version='original'):
     print(f"Training decision trees for segments: {segment_type_list}")
     print(f"Modes: {mode_list}")
     print(f"Max depths: {max_depth_list}")
-    print(f"Using {'V2' if use_v2 else 'original'} data")
+    print(f"Using {data_version.upper()} data")
     print("="*60)
     
     # Load data once
     print("Loading data...")
-    df = load_parquet_data(use_v2)
+    df = load_parquet_data(data_version)
     df = add_churned_indicator(df)
-    # Select one row per purchase_session_id arbitrarily
+    
 
-    if use_v2:
-        assert 'rider_lyft_id' in df.columns, f"rider_lyft_id should be in columns when use_v2=True, but not found. Available columns: {[col for col in df.columns if 'session' in col]}"
-        print(f"Verified: rider_session_id is in columns for V2 data")
+    
+    # Select one row per purchase_session_id arbitrarily
+    if data_version in ['v2', 'v3']:
+        assert 'rider_lyft_id' in df.columns, f"rider_lyft_id should be in columns when data_version={data_version}, but not found. Available columns: {[col for col in df.columns if 'session' in col]}"
+        print(f"Verified: rider_lyft_id is in columns for {data_version.upper()} data")
 
     df = df.drop_duplicates(subset=['purchase_session_id'], keep='first')
     print(f"After deduplication: {len(df)} rows")
@@ -316,7 +324,7 @@ def main(mode_list, max_depth_list, segment_type_list, use_v2=False):
                 for mode in mode_list:
                     tasks.append(executor.submit(
                         run_for_mode_and_depth, 
-                        df_segment, mode, max_depth, segment_type, use_v2
+                        df_segment, mode, max_depth, segment_type, data_version
                     ))
             
             # Process results with better error handling
@@ -328,7 +336,7 @@ def main(mode_list, max_depth_list, segment_type_list, use_v2=False):
                     print("Continuing with other tasks...")
                     continue
         
-        data_suffix = "_v2" if use_v2 else ""
+        data_suffix = f"_{data_version}" if data_version != 'original' else ""
         print(f"\nTraining completed for segment: {segment_type}")
         print(f"Results saved to:")
         print(f"  - Plots: /home/sagemaker-user/studio/src/new-rider-v3/plots/decision_tree/all_features{data_suffix}/segment_{segment_type}/")
@@ -337,16 +345,17 @@ def main(mode_list, max_depth_list, segment_type_list, use_v2=False):
 
 if __name__ == "__main__":
     # Configuration
-    segment_type_list = ['churned', 'airport', 'all']
+    #segment_type_list = ['churned', 'airport', 'airport_dropoff', 'airport_pickup', 'all']
+    segment_type_list = ['airport_dropoff', 'airport_pickup']
     #segment_type_list = ['all']
     
     # Max depth list - simplified
     #max_depth_list = [10]  # Simple depth values
-    max_depth_list = [10]  # Simple depth values
+    max_depth_list = [3,5,10]  # Simple depth values
     
     mode_list = ['fastpass', 'standard', 'premium', 'plus', 'lux', 'luxsuv']
     
-    # Set to True to use V2 data, False for original data
-    use_v2 = True
+    # Set data version: 'original', 'v2', or 'v3'
+    data_version = 'v3'
     
-    main(mode_list, max_depth_list, segment_type_list, use_v2) 
+    main(mode_list, max_depth_list, segment_type_list, data_version) 

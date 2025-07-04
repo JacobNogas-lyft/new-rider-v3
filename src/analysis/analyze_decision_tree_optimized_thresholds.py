@@ -255,7 +255,16 @@ def analyze_all_models_with_optimization(use_v2=False):
             if not all_features_found:
                 continue
             
-            if 'max_depth_10' not in path_parts:
+            # Include all max_depth values: 3, 5, 10
+            max_depth_found = False
+            for part in path_parts:
+                if part.startswith('max_depth_'):
+                    depth_value = part.replace('max_depth_', '')
+                    if depth_value in ['3', '5', '10']:
+                        max_depth_found = True
+                        break
+            
+            if not max_depth_found:
                 continue
                 
             segment = None
@@ -434,6 +443,120 @@ def create_optimized_analysis_plots(df, use_v2=False):
     plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{data_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
+def create_optimized_analysis_plots_by_depth(df, use_v2=False):
+    """Create separate visualization plots for each max_depth value."""
+    plt.style.use('default')
+    sns.set_palette("YlGn")
+    vmin, vmax = 0, 1
+    
+    # Add data version to title
+    data_version = "V2" if use_v2 else "Original"
+    
+    # Get unique max_depth values
+    max_depths = sorted(df['max_depth'].unique())
+    
+    for max_depth in max_depths:
+        print(f"Creating plots for max_depth={max_depth}...")
+        
+        # Filter data for this max_depth
+        df_depth = df[df['max_depth'] == max_depth].copy()
+        
+        if len(df_depth) == 0:
+            print(f"No data found for max_depth={max_depth}, skipping...")
+            continue
+        
+        fig, axes = plt.subplots(5, 3, figsize=(24, 30))
+        fig.suptitle(f'Decision Tree Model Performance: Optimized vs Default Thresholds - {data_version} Data (max_depth={max_depth})', fontsize=16, fontweight='bold')
+        
+        # Row 1: Default Threshold Performance
+        ax1 = axes[0, 0]
+        pivot_default_precision = df_depth.pivot_table(index='mode', columns='segment', values='default_precision', aggfunc='mean')
+        sns.heatmap(pivot_default_precision, annot=True, fmt='.3f', cmap='YlGn', ax=ax1, center=0.5, vmin=vmin, vmax=vmax)
+        ax1.set_title('Default Threshold (0.5) - Precision')
+        ax2 = axes[0, 1]
+        pivot_default_recall = df_depth.pivot_table(index='mode', columns='segment', values='default_recall', aggfunc='mean')
+        sns.heatmap(pivot_default_recall, annot=True, fmt='.3f', cmap='YlGn', ax=ax2, center=0.5, vmin=vmin, vmax=vmax)
+        ax2.set_title('Default Threshold (0.5) - Recall')
+        ax3 = axes[0, 2]
+        pivot_default_f1 = df_depth.pivot_table(index='mode', columns='segment', values='default_f1', aggfunc='mean')
+        sns.heatmap(pivot_default_f1, annot=True, fmt='.3f', cmap='YlGn', ax=ax3, center=0.5, vmin=vmin, vmax=vmax)
+        ax3.set_title('Default Threshold (0.5) - F1 Score')
+        
+        # Row 2: Optimized Threshold Performance
+        ax4 = axes[1, 0]
+        pivot_optimal_precision = df_depth.pivot_table(index='mode', columns='segment', values='optimal_precision', aggfunc='mean')
+        sns.heatmap(pivot_optimal_precision, annot=True, fmt='.3f', cmap='YlGn', ax=ax4, center=0.5, vmin=vmin, vmax=vmax)
+        ax4.set_title('Optimized Threshold - Precision')
+        ax5 = axes[1, 1]
+        pivot_optimal_recall = df_depth.pivot_table(index='mode', columns='segment', values='optimal_recall', aggfunc='mean')
+        sns.heatmap(pivot_optimal_recall, annot=True, fmt='.3f', cmap='YlGn', ax=ax5, center=0.5, vmin=vmin, vmax=vmax)
+        ax5.set_title('Optimized Threshold - Recall')
+        ax6 = axes[1, 2]
+        pivot_optimal_f1 = df_depth.pivot_table(index='mode', columns='segment', values='optimal_f1', aggfunc='mean')
+        sns.heatmap(pivot_optimal_f1, annot=True, fmt='.3f', cmap='YlGn', ax=ax6, center=0.5, vmin=vmin, vmax=vmax)
+        ax6.set_title('Optimized Threshold - F1 Score')
+        
+        # Row 3: Improvements and Analysis
+        ax7 = axes[2, 0]
+        df_depth['precision_improvement'] = df_depth['optimal_precision'] - df_depth['default_precision']
+        pivot_precision_improvement = df_depth.pivot_table(index='mode', columns='segment', values='precision_improvement', aggfunc='mean')
+        sns.heatmap(pivot_precision_improvement, annot=True, fmt='.3f', cmap='RdYlGn', ax=ax7, center=0)
+        ax7.set_title('Precision Improvement (Optimal - Default)')
+        ax8 = axes[2, 1]
+        df_depth['f1_improvement'] = df_depth['optimal_f1'] - df_depth['default_f1']
+        pivot_f1_improvement = df_depth.pivot_table(index='mode', columns='segment', values='f1_improvement', aggfunc='mean')
+        sns.heatmap(pivot_f1_improvement, annot=True, fmt='.3f', cmap='RdYlGn', ax=ax8, center=0)
+        ax8.set_title('F1 Score Improvement (Optimal - Default)')
+        ax9 = axes[2, 2]
+        pivot_optimal_threshold = df_depth.pivot_table(index='mode', columns='segment', values='optimal_threshold', aggfunc='mean')
+        sns.heatmap(pivot_optimal_threshold, annot=True, fmt='.3f', cmap='YlGn', ax=ax9, vmin=0.3, vmax=0.9)
+        ax9.set_title('Optimal Threshold Values')
+        
+        # Row 4: Positive Prediction Ratios (relative to total samples)
+        total_samples = 122925
+        ax10 = axes[3, 0]
+        pivot_default_pos_count = df_depth.pivot_table(index='mode', columns='segment', values='default_positive_preds', aggfunc='mean')
+        pivot_default_pos_ratio_global = (pivot_default_pos_count / total_samples) * 100
+        # Handle NaN values in annotation
+        annot_default = pivot_default_pos_ratio_global.round(2).fillna(0).astype(str) + '% (' + pivot_default_pos_count.round(0).fillna(0).astype(int).astype(str) + ')'
+        sns.heatmap(pivot_default_pos_ratio_global, annot=annot_default, fmt='', cmap='YlGn', ax=ax10, vmin=0, vmax=100)
+        ax10.set_title('Default Threshold - % Predicted Positive (Global)')
+        ax11 = axes[3, 1]
+        pivot_optimal_pos_count = df_depth.pivot_table(index='mode', columns='segment', values='optimal_positive_preds', aggfunc='mean')
+        pivot_optimal_pos_ratio_global = (pivot_optimal_pos_count / total_samples) * 100
+        # Handle NaN values in annotation
+        annot_optimal = pivot_optimal_pos_ratio_global.round(2).fillna(0).astype(str) + '% (' + pivot_optimal_pos_count.round(0).fillna(0).astype(int).astype(str) + ')'
+        sns.heatmap(pivot_optimal_pos_ratio_global, annot=annot_optimal, fmt='', cmap='YlGn', ax=ax11, vmin=0, vmax=100)
+        ax11.set_title('Optimized Threshold - % Predicted Positive (Global)')
+        
+        # 5. Percentage of riders receiving a positive prediction (default threshold)
+        ax12 = axes[3, 2]
+        pct_riders_default = df_depth.pivot_table(index='mode', columns='segment', values='pct_riders_positive_default', aggfunc='mean')
+        sns.heatmap(pct_riders_default, annot=True, fmt='.2%', cmap='YlGn', ax=ax12, vmin=0, vmax=1)
+        ax12.set_title('% Riders w/ Positive Prediction (Default)')
+        
+        # 6. Percentage of riders receiving a positive prediction (optimal threshold)
+        ax13 = axes[4, 0]
+        pct_riders_optimal = df_depth.pivot_table(index='mode', columns='segment', values='pct_riders_positive_optimal', aggfunc='mean')
+        sns.heatmap(pct_riders_optimal, annot=True, fmt='.2%', cmap='YlGn', ax=ax13, vmin=0, vmax=1)
+        ax13.set_title('% Riders w/ Positive Prediction (Optimal)')
+        
+        # Hide unused subplots
+        ax14 = axes[4, 1]
+        ax14.axis('off')
+        ax15 = axes[4, 2]
+        ax15.axis('off')
+        
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        
+        # Save with data version and max_depth suffix
+        data_suffix = "_v2" if use_v2 else ""
+        plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{data_suffix}_max_depth_{max_depth}.pdf', dpi=300, bbox_inches='tight')
+        plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{data_suffix}_max_depth_{max_depth}.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"✅ Plots saved for max_depth={max_depth}")
+
 def print_optimized_analysis(df, use_v2=False):
     """Print detailed analysis of the optimized threshold results."""
     data_version = "V2" if use_v2 else "Original"
@@ -542,6 +665,7 @@ if __name__ == "__main__":
     if len(df) > 0:
         print_optimized_analysis(df, use_v2)
         create_optimized_analysis_plots(df, use_v2)
+        create_optimized_analysis_plots_by_depth(df, use_v2)
         
         # Save the analysis to CSV with data version suffix
         data_suffix = "_v2" if use_v2 else ""
@@ -551,6 +675,7 @@ if __name__ == "__main__":
         
         plot_suffix = "_v2" if use_v2 else ""
         print(f"📈 Plots saved to '/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{plot_suffix}.pdf' and '.png'")
+        print(f"📈 Separate plots created for each max_depth value: optimized_threshold_analysis_summary_decision_tree{plot_suffix}_max_depth_[3,5,10].pdf and .png")
     else:
         data_version = "V2" if use_v2 else "original"
         print(f"No Decision Tree models found to analyze for {data_version} data.") 
