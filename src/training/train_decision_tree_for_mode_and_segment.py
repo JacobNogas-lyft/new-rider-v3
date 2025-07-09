@@ -345,15 +345,16 @@ def main(mode_list, max_depth_list, segment_type_list, data_version='original'):
 
 if __name__ == "__main__":
     # Configuration
-    #segment_type_list = ['churned', 'airport', 'airport_dropoff', 'airport_pickup', 'all']
-    segment_type_list = ['airport_dropoff', 'airport_pickup']
+    segment_type_list = ['churned', 'airport', 'airport_dropoff', 'airport_pickup', 'all']
+    #segment_type_list = ['airport_dropoff', 'airport_pickup']
     #segment_type_list = ['all']
     
     # Max depth list - simplified
     #max_depth_list = [10]  # Simple depth values
     max_depth_list = [3,5,10]  # Simple depth values
     
-    mode_list = ['fastpass', 'standard', 'premium', 'plus', 'lux', 'luxsuv']
+    #mode_list = ['fastpass', 'standard', 'premium', 'plus', 'lux', 'luxsuv']
+    mode_list = ['standard_saver']
     
     # Set data version: 'original', 'v2', or 'v3'
     data_version = 'v3'

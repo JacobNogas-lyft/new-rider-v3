@@ -26,18 +26,39 @@ def add_churned_indicator(df):
     df['is_churned_user'] = churned_mask.astype(int)
     return df
 
+
+
 def filter_by_segment(df, segment_type):
     """
     Filter dataframe by segment type.
-    ... (same as in XGBoost script)
+    
+    Args:
+        df (pandas.DataFrame): Input dataframe
+        segment_type (str): Type of segment to filter by
+            - 'airport': Sessions where destination_venue_category = 'airport' or origin_venue_category = 'airport'
+            - 'airport_dropoff': Sessions where destination_venue_category = 'airport'
+            - 'airport_pickup': Sessions where origin_venue_category = 'airport'
+            - 'churned': Sessions where rider is churned (is_churned_user = 1)
+            - 'all': No filtering (use all data)
+    
+    Returns:
+        pandas.DataFrame: Filtered dataframe
     """
     if segment_type == 'airport':
         airport_mask = (
-            (df['destination_venue_category'] == 'airport') | 
+            (df['destination_venue_category'] == 'airport') |
             (df['origin_venue_category'] == 'airport')
         )
         filtered_df = df[airport_mask].copy()
         print(f"Airport sessions: {len(filtered_df)} rows (from {len(df)} total)")
+    elif segment_type == 'airport_dropoff':
+        airport_dropoff_mask = (df['destination_venue_category'] == 'airport')
+        filtered_df = df[airport_dropoff_mask].copy()
+        print(f"Airport dropoff sessions: {len(filtered_df)} rows (from {len(df)} total)")
+    elif segment_type == 'airport_pickup':
+        airport_pickup_mask = (df['origin_venue_category'] == 'airport')
+        filtered_df = df[airport_pickup_mask].copy()
+        print(f"Airport pickup sessions: {len(filtered_df)} rows (from {len(df)} total)")
     elif segment_type == 'churned':
         churned_mask = (df['is_churned_user'] == 1)
         filtered_df = df[churned_mask].copy()
@@ -46,44 +67,76 @@ def filter_by_segment(df, segment_type):
         filtered_df = df.copy()
         print(f"Using all data: {len(filtered_df)} rows")
     else:
-        raise ValueError(f"Unknown segment type: {segment_type}. Use 'airport', 'churned', or 'all'")
+        raise ValueError(f"Unknown segment type: {segment_type}. Use 'airport', 'airport_dropoff', 'airport_pickup', 'churned', or 'all'")
     return filtered_df
 
-def prepare_features_target_and_rider_id(df, mode):
+def prepare_features_and_target_for_analysis(df, mode):
+    """
+    EXACT COPY of prepare_features_and_target from training script.
+    This ensures we get the exact same features and can use the same train/test split.
+    """
+    # Use the exact same CATEGORICAL_COLS_TO_DROP as training script
+    CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
+                                'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id',
+                                'rider_lyft_id',
+                                'signup_at',
+                                'destination_place_name',
+                                'pickup_place_name']
+    
     df['target_diff_mode'] = ((df['requested_ride_type'] != df['preselected_mode']) & (df['requested_ride_type'] == mode)).astype(int)
+    
+    # Add percentage features for lifetime rides
     print("Creating percentage features for lifetime rides...")
+    
+    # Handle division by zero by replacing 0 with NaN, then filling with 0
     df['percent_rides_standard_lifetime'] = (
         df['rides_standard_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
     ).fillna(0)
+    
     df['percent_rides_premium_lifetime'] = (
         df['rides_premium_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
     ).fillna(0)
+    
     df['percent_rides_plus_lifetime'] = (
         df['rides_plus_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
     ).fillna(0)
-    CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
-                                'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id']
+    
+    print(f"Created percentage features:")
+    
     drop_cols = ['target_diff_mode', 'requested_ride_type', 'preselected_mode']
     numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    # Ensure rider_lyft_id is not included in features
-    feature_cols = [col for col in numeric_cols if col not in drop_cols and col != 'rider_lyft_id'] + [col for col in categorical_cols if (col not in drop_cols) and (col not in CATEGORICAL_COLS_TO_DROP) and col != 'rider_lyft_id']
+    
+    feature_cols = [col for col in numeric_cols if col not in drop_cols] + [col for col in categorical_cols if (col not in drop_cols) and (col not in CATEGORICAL_COLS_TO_DROP)]
     X = df[feature_cols]
     y = df['target_diff_mode']
-    # Keep rider_lyft_id for later analysis
-    rider_ids = df['rider_lyft_id'].values if 'rider_lyft_id' in df.columns else np.array([None]*len(df))
+    
     print(f"Before get_dummies - X shape: {X.shape}")
+    print(f"Memory usage before encoding: {X.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+    
     X = pd.get_dummies(X, drop_first=True)
+    
     print(f"After get_dummies - X shape: {X.shape}")
+    print(f"Memory usage after encoding: {X.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
     print("Data loaded and processed.")
-    return X, y, rider_ids
+    return X, y
 
-def load_or_create_test_data_for_model(df_segment, segment_type, mode, use_v2=False):
-    data_suffix = "_v2" if use_v2 else ""
-    cache_key = f"test_data_{segment_type}_{mode}"
+def split_data_for_analysis(X, y):
+    """
+    EXACT COPY of split_data from training script.
+    This ensures we get the exact same train/test split as used during training.
+    """
+    print("Splitting data into train and test sets (stratified)...")
+    return train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+def load_or_create_test_data_for_model(df_segment, df_segment_with_rider_id, segment_type, mode, data_version='v2', force_recreate=False):
+    data_suffix = f"_{data_version}" if data_version != 'original' else ""
+    # Include data_version in cache key to avoid feature mismatch issues
+    cache_key = f"test_data_{segment_type}_{mode}_{data_version}"
     cache_file = f'/home/sagemaker-user/studio/src/new-rider-v3/data{data_suffix}/{cache_key}.joblib'
-    if os.path.exists(cache_file):
-        print(f"Loading cached test data for {cache_key} (V2={use_v2})...")
+    
+    if not force_recreate and os.path.exists(cache_file):
+        print(f"Loading cached test data for {cache_key} (data_version={data_version})...")
         try:
             cached_data = joblib.load(cache_file)
             X_test, y_test, rider_ids_test = cached_data
@@ -92,11 +145,32 @@ def load_or_create_test_data_for_model(df_segment, segment_type, mode, use_v2=Fa
         except Exception as e:
             print(f"Error loading cached data: {e}")
             print("Will recreate test data...")
-    print(f"Creating test data for {cache_key} (V2={use_v2})...")
-    X, y, rider_ids = prepare_features_target_and_rider_id(df_segment, mode)
-    X_train, X_test, y_train, y_test, rider_ids_train, rider_ids_test = train_test_split(
-        X, y, rider_ids, test_size=0.2, random_state=42, stratify=y
-    )
+    
+    print(f"Creating test data for {cache_key} (data_version={data_version})...")
+    
+    # Use the exact same feature preparation as training script
+    X, y = prepare_features_and_target_for_analysis(df_segment, mode)
+    
+    # Use the exact same train/test split as training script
+    X_train, X_test, y_train, y_test = split_data_for_analysis(X, y)
+    
+    # Extract rider_ids for the test set (for analysis purposes)
+    # We need to get the test indices to extract the corresponding rider_ids
+    if df_segment_with_rider_id is not None and 'rider_lyft_id' in df_segment_with_rider_id.columns:
+        # Get the same test indices by recreating the split on the original dataframe indices
+        df_for_split = df_segment_with_rider_id.copy()
+        df_for_split['target_diff_mode'] = ((df_for_split['requested_ride_type'] != df_for_split['preselected_mode']) & (df_for_split['requested_ride_type'] == mode)).astype(int)
+        
+        # Split the indices to match the feature split
+        indices = df_for_split.index.values
+        _, indices_test, _, _ = train_test_split(
+            indices, df_for_split['target_diff_mode'], 
+            test_size=0.2, random_state=42, stratify=df_for_split['target_diff_mode']
+        )
+        rider_ids_test = df_segment_with_rider_id.loc[indices_test, 'rider_lyft_id'].values
+    else:
+        rider_ids_test = np.array([None] * len(X_test))
+    
     cache_dir = f'/home/sagemaker-user/studio/src/new-rider-v3/data{data_suffix}'
     Path(cache_dir).mkdir(exist_ok=True, parents=True)
     print(f"Saving test data to cache: {cache_file}")
@@ -105,7 +179,7 @@ def load_or_create_test_data_for_model(df_segment, segment_type, mode, use_v2=Fa
     print(f"Test class distribution: {dict(zip(*np.unique(y_test, return_counts=True)))}")
     return X_test, y_test, rider_ids_test
 
-def load_model_and_data(model_path, df_segment=None, use_v2=False):
+def load_model_and_data(model_path, df_segment=None, df_segment_with_rider_id=None, data_version='v2', force_recreate_cache=False):
     try:
         model = joblib.load(model_path)
         print(f"Model loaded from: {model_path}")
@@ -119,7 +193,7 @@ def load_model_and_data(model_path, df_segment=None, use_v2=False):
                 mode = part.replace('mode_', '')
         if not segment or not mode:
             raise ValueError(f"Could not extract segment and mode from path: {model_path}")
-        X_test, y_test, rider_ids_test = load_or_create_test_data_for_model(df_segment, segment, mode, use_v2)
+        X_test, y_test, rider_ids_test = load_or_create_test_data_for_model(df_segment, df_segment_with_rider_id, segment, mode, data_version, force_recreate_cache)
         return model, X_test, y_test, rider_ids_test
     except Exception as e:
         print(f"Error loading model or data: {e}")
@@ -196,11 +270,127 @@ def find_optimal_threshold(model, X_test, y_test, rider_ids_test):
     }
     return results
 
-def analyze_all_models_with_optimization(use_v2=False):
+def compare_model_features(segment, mode, max_depth=10):
+    """Compare expected features between v2 and v3 models for the same segment/mode."""
+    print(f"\n{'='*80}")
+    print(f"COMPARING MODEL FEATURES: {segment}/{mode} (max_depth={max_depth})")
+    print(f"{'='*80}")
+    
+    results = {}
+    
+    for data_version in ['v2', 'v3']:
+        data_suffix = f"_{data_version}" if data_version != 'original' else ""
+        model_path = f'/home/sagemaker-user/studio/src/new-rider-v3/models/decision_tree/all_features{data_suffix}/segment_{segment}/mode_{mode}/max_depth_{max_depth}/decision_tree_model.joblib'
+        
+        print(f"\n--- {data_version.upper()} Model ---")
+        print(f"Path: {model_path}")
+        
+        if not os.path.exists(model_path):
+            print(f"❌ Model not found for {data_version}")
+            results[data_version] = None
+            continue
+            
+        try:
+            model = joblib.load(model_path)
+            print(f"✅ Model loaded successfully")
+            
+            if hasattr(model, 'feature_names_in_'):
+                features = model.feature_names_in_
+                print(f"📊 Model expects {len(features)} features")
+                results[data_version] = set(features)
+            elif hasattr(model, 'n_features_in_'):
+                print(f"📊 Model expects {model.n_features_in_} features (no feature names available)")
+                results[data_version] = f"n_features_in_: {model.n_features_in_}"
+            else:
+                print(f"❌ Cannot determine feature information")
+                results[data_version] = None
+                
+        except Exception as e:
+            print(f"❌ Error loading model: {e}")
+            results[data_version] = None
+    
+    # Compare features if both models loaded successfully
+    if results['v2'] is not None and results['v3'] is not None:
+        if isinstance(results['v2'], set) and isinstance(results['v3'], set):
+            print(f"\n--- FEATURE COMPARISON ---")
+            
+            v2_features = results['v2']
+            v3_features = results['v3']
+            
+            print(f"V2 features: {len(v2_features)}")
+            print(f"V3 features: {len(v3_features)}")
+            
+            # Features only in v2
+            v2_only = v2_features - v3_features
+            if v2_only:
+                print(f"\n🔴 Features only in V2 ({len(v2_only)}):")
+                for i, feature in enumerate(sorted(v2_only)[:10]):  # Show first 10
+                    print(f"  {i+1}. {feature}")
+                if len(v2_only) > 10:
+                    print(f"  ... and {len(v2_only) - 10} more")
+            
+            # Features only in v3
+            v3_only = v3_features - v2_features
+            if v3_only:
+                print(f"\n🟢 Features only in V3 ({len(v3_only)}):")
+                for i, feature in enumerate(sorted(v3_only)[:10]):  # Show first 10
+                    print(f"  {i+1}. {feature}")
+                if len(v3_only) > 10:
+                    print(f"  ... and {len(v3_only) - 10} more")
+            
+            # Common features
+            common = v2_features & v3_features
+            print(f"\n✅ Common features: {len(common)}")
+            
+            if len(v2_only) == 0 and len(v3_only) == 0:
+                print("🎉 Perfect match! All features are identical.")
+            else:
+                print(f"⚠️  Feature mismatch detected!")
+                
+        else:
+            print(f"\n--- COMPARISON RESULTS ---")
+            print(f"V2: {results['v2']}")
+            print(f"V3: {results['v3']}")
+    
+    return results
+
+def clear_old_cache_files(data_version='v2'):
+    """Clear old cache files that might have incompatible features."""
+    data_suffix = f"_{data_version}" if data_version != 'original' else ""
+    cache_dir = f'/home/sagemaker-user/studio/src/new-rider-v3/data{data_suffix}'
+    
+    if not os.path.exists(cache_dir):
+        return
+    
+    # Clear old cache files that don't have data_version in the key
+    old_pattern = re.compile(r'test_data_\w+_\w+\.joblib$')  # Without data_version
+    new_pattern = re.compile(r'test_data_\w+_\w+_v\d+\.joblib$')  # With data_version
+    
+    cleared_count = 0
+    for filename in os.listdir(cache_dir):
+        if old_pattern.match(filename) and not new_pattern.match(filename):
+            file_path = os.path.join(cache_dir, filename)
+            try:
+                os.remove(file_path)
+                print(f"Cleared old cache file: {filename}")
+                cleared_count += 1
+            except Exception as e:
+                print(f"Error clearing {filename}: {e}")
+    
+    if cleared_count > 0:
+        print(f"✅ Cleared {cleared_count} old cache files")
+    else:
+        print("No old cache files to clear")
+
+def analyze_all_models_with_optimization(data_version='v2', force_recreate_cache=False):
     all_results = []
     
-    # Determine the base path based on use_v2 flag
-    data_suffix = "_v2" if use_v2 else ""
+    # Clear old cache files to avoid feature mismatch issues
+    print("Clearing old cache files...")
+    clear_old_cache_files(data_version)
+    
+    # Determine the base path based on data_version
+    data_suffix = f"_{data_version}" if data_version != 'original' else ""
     base_models_path = f'/home/sagemaker-user/studio/src/new-rider-v3/models/decision_tree/all_features{data_suffix}'
     
     print(f"Analyzing models from: {base_models_path}")
@@ -210,30 +400,43 @@ def analyze_all_models_with_optimization(use_v2=False):
         print(f"ERROR: Directory {base_models_path} does not exist!")
         return pd.DataFrame(all_results)
     
-    # Load data once at the beginning (following training script pattern)
+    # Load data once at the beginning (EXACT COPY of training script preprocessing)
     print("Loading data once for all analysis...")
     from utils.load_data import load_parquet_data
-    df = load_parquet_data(use_v2)
-    df = add_churned_indicator(df)
+    df_original = load_parquet_data(data_version)
+    df_original = add_churned_indicator(df_original)
     
-    # Apply the same preprocessing as training script
-    if use_v2:
-        assert 'rider_lyft_id' in df.columns, f"rider_lyft_id should be in columns when use_v2=True, but not found. Available columns: {[col for col in df.columns if 'session' in col]}"
-        print(f"Verified: rider_lyft_id is in columns for V2 data")
+    # Keep a copy with rider_lyft_id for analysis purposes
+    df_with_rider_id = df_original.copy()
+    
+    # Apply the EXACT same preprocessing as training script
+    if data_version in ['v2', 'v3']:
+        assert 'rider_lyft_id' in df_original.columns, f"rider_lyft_id should be in columns when data_version={data_version}, but not found. Available columns: {[col for col in df_original.columns if 'session' in col]}"
+        print(f"Verified: rider_lyft_id is in columns for {data_version.upper()} data")
 
-    df = df.drop_duplicates(subset=['purchase_session_id'], keep='first')
+    df = df_original.drop_duplicates(subset=['purchase_session_id'], keep='first')
     print(f"After deduplication: {len(df)} rows")
     
     # Assert that we have exactly 1 row per purchase_session_id
     assert df['purchase_session_id'].nunique() == len(df), f"Expected 1 row per purchase_session_id, but got {len(df)} rows for {df['purchase_session_id'].nunique()} unique purchase_session_ids"
     print(f"Verified: {len(df)} rows with {df['purchase_session_id'].nunique()} unique purchase_session_ids")
 
+    # Use the EXACT same CATEGORICAL_COLS_TO_DROP as training script
     CATEGORICAL_COLS_TO_DROP = ['purchase_session_id', 'candidate_product_key',
-                                'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id']
+                                'last_purchase_session_id', 'session_id', 'last_http_id', 'price_quote_id',
+                                'rider_lyft_id',
+                                'signup_at',
+                                'destination_place_name',
+                                'pickup_place_name']
     df.drop(columns=CATEGORICAL_COLS_TO_DROP, inplace=True)
     
-    # Note: rider_lyft_id is kept for rider counting functionality
-    print(f"Verified: rider_lyft_id kept for analysis")
+    # Assert that rider_lyft_id is not in columns (matches training script)
+    assert 'rider_lyft_id' not in df.columns, f"rider_lyft_id should not be in columns, but found: {[col for col in df.columns if 'rider_lyft_id' in col]}"
+    print(f"Verified: rider_lyft_id not in columns")
+    
+    # Keep the version with rider_lyft_id for segment processing
+    df_with_rider_id = df_with_rider_id.drop_duplicates(subset=['purchase_session_id'], keep='first')
+    print(f"Keeping parallel dataframe with rider_lyft_id for analysis purposes")
     
     # Group models by segment for efficient processing
     segment_models = {}
@@ -296,8 +499,12 @@ def analyze_all_models_with_optimization(use_v2=False):
         
         # Filter data for this segment (following training script pattern)
         df_segment = filter_by_segment(df, segment_type)
+        df_segment_with_rider_id = filter_by_segment(df_with_rider_id, segment_type)
+        
+        # Filter out rows with missing required columns
         required_cols = ['requested_ride_type', 'preselected_mode']
         df_segment = df_segment.dropna(subset=required_cols)
+        df_segment_with_rider_id = df_segment_with_rider_id.dropna(subset=required_cols)
         print(f"Segment data shape: {df_segment.shape}")
         
         # Process each model for this segment
@@ -307,7 +514,7 @@ def analyze_all_models_with_optimization(use_v2=False):
             print(f"{'='*60}")
             
             try:
-                model, X_test, y_test, rider_ids_test = load_model_and_data(file_path, df_segment, use_v2)
+                model, X_test, y_test, rider_ids_test = load_model_and_data(file_path, df_segment, df_segment_with_rider_id, data_version, force_recreate_cache)
                 if model is None:
                     print(f"Skipping {file_path} due to loading error")
                     continue
@@ -323,7 +530,7 @@ def analyze_all_models_with_optimization(use_v2=False):
                     'mode': mode,
                     'max_depth': depth,
                     'model_path': file_path,
-                    'data_version': 'V2' if use_v2 else 'Original',
+                    'data_version': data_version.upper(),
                     'rider_ids_test': rider_ids_test  # Save for later
                 })
                 all_results.append(results)
@@ -344,17 +551,17 @@ def analyze_all_models_with_optimization(use_v2=False):
     else:
         return pd.DataFrame(all_results)
 
-def create_optimized_analysis_plots(df, use_v2=False):
+def create_optimized_analysis_plots(df, data_version='v2'):
     """Create visualization plots for the optimized threshold analysis."""
     plt.style.use('default')
     sns.set_palette("YlGn")
     vmin, vmax = 0, 1
     
     # Add data version to title
-    data_version = "V2" if use_v2 else "Original"
+    data_version_title = data_version.upper()
     
     fig, axes = plt.subplots(5, 3, figsize=(24, 30))
-    fig.suptitle(f'Decision Tree Model Performance: Optimized vs Default Thresholds - {data_version} Data', fontsize=16, fontweight='bold')
+    fig.suptitle(f'Decision Tree Model Performance: Optimized vs Default Thresholds - {data_version_title} Data', fontsize=16, fontweight='bold')
     
     # Row 1: Default Threshold Performance
     ax1 = axes[0, 0]
@@ -438,19 +645,19 @@ def create_optimized_analysis_plots(df, use_v2=False):
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     
     # Save with data version suffix
-    data_suffix = "_v2" if use_v2 else ""
+    data_suffix = f"_{data_version}" if data_version != 'original' else ""
     plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{data_suffix}.pdf', dpi=300, bbox_inches='tight')
     plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{data_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def create_optimized_analysis_plots_by_depth(df, use_v2=False):
+def create_optimized_analysis_plots_by_depth(df, data_version='v2'):
     """Create separate visualization plots for each max_depth value."""
     plt.style.use('default')
     sns.set_palette("YlGn")
     vmin, vmax = 0, 1
     
     # Add data version to title
-    data_version = "V2" if use_v2 else "Original"
+    data_version_title = data_version.upper()
     
     # Get unique max_depth values
     max_depths = sorted(df['max_depth'].unique())
@@ -466,7 +673,7 @@ def create_optimized_analysis_plots_by_depth(df, use_v2=False):
             continue
         
         fig, axes = plt.subplots(5, 3, figsize=(24, 30))
-        fig.suptitle(f'Decision Tree Model Performance: Optimized vs Default Thresholds - {data_version} Data (max_depth={max_depth})', fontsize=16, fontweight='bold')
+        fig.suptitle(f'Decision Tree Model Performance: Optimized vs Default Thresholds - {data_version_title} Data (max_depth={max_depth})', fontsize=16, fontweight='bold')
         
         # Row 1: Default Threshold Performance
         ax1 = axes[0, 0]
@@ -550,22 +757,22 @@ def create_optimized_analysis_plots_by_depth(df, use_v2=False):
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         
         # Save with data version and max_depth suffix
-        data_suffix = "_v2" if use_v2 else ""
+        data_suffix = f"_{data_version}" if data_version != 'original' else ""
         plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{data_suffix}_max_depth_{max_depth}.pdf', dpi=300, bbox_inches='tight')
         plt.savefig(f'/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{data_suffix}_max_depth_{max_depth}.png', dpi=300, bbox_inches='tight')
         plt.close()
         
         print(f"✅ Plots saved for max_depth={max_depth}")
 
-def print_optimized_analysis(df, use_v2=False):
+def print_optimized_analysis(df, data_version='v2'):
     """Print detailed analysis of the optimized threshold results."""
-    data_version = "V2" if use_v2 else "Original"
+    data_version_title = data_version.upper()
     
     print("=" * 80)
-    print(f"DECISION TREE OPTIMIZED THRESHOLD ANALYSIS - {data_version} DATA")
+    print(f"DECISION TREE OPTIMIZED THRESHOLD ANALYSIS - {data_version_title} DATA")
     print("=" * 80)
     print(f"\nTotal models analyzed: {len(df)}")
-    print(f"Data version: {data_version}")
+    print(f"Data version: {data_version_title}")
     print(f"Segments: {df['segment'].unique()}")
     print(f"Modes: {df['mode'].unique()}")
     print(f"Max depths: {df['max_depth'].unique()}")
@@ -656,26 +863,36 @@ def print_optimized_analysis(df, use_v2=False):
     print("  - Consider implementing threshold optimization in production models")
 
 if __name__ == "__main__":
-    # Set to True to analyze V2 data, False for original data
-    use_v2 = True
+    # Set data version: 'original', 'v2', or 'v3'
+    data_version = 'v3'
     
+    # OPTION 1: Run feature comparison (uncomment to compare features between v2 and v3)
+    # print("=" * 80)
+    # print("FEATURE COMPARISON MODE")
+    # print("=" * 80)
+    # compare_model_features('all', 'standard', max_depth=10)
+    # compare_model_features('airport', 'luxsuv', max_depth=10)
+    # exit()
+    
+    # OPTION 2: Run full analysis (default)
     Path('/home/sagemaker-user/studio/src/new-rider-v3/plots').mkdir(exist_ok=True, parents=True)
+    Path('/home/sagemaker-user/studio/src/new-rider-v3/reports').mkdir(exist_ok=True, parents=True)
     print("Starting Decision Tree model analysis with threshold optimization...")
-    df = analyze_all_models_with_optimization(use_v2)
+    # Force cache recreation for v3 since it has new features
+    df = analyze_all_models_with_optimization(data_version, force_recreate_cache=True)
     if len(df) > 0:
-        print_optimized_analysis(df, use_v2)
-        create_optimized_analysis_plots(df, use_v2)
-        create_optimized_analysis_plots_by_depth(df, use_v2)
+        print_optimized_analysis(df, data_version)
+        create_optimized_analysis_plots(df, data_version)
+        create_optimized_analysis_plots_by_depth(df, data_version)
         
         # Save the analysis to CSV with data version suffix
-        data_suffix = "_v2" if use_v2 else ""
+        data_suffix = f"_{data_version}" if data_version != 'original' else ""
         csv_path = f'/home/sagemaker-user/studio/src/new-rider-v3/reports/optimized_threshold_analysis_summary_decision_tree{data_suffix}.csv'
         df.to_csv(csv_path, index=False)
         print(f"\n📊 Analysis saved to '{csv_path}'")
         
-        plot_suffix = "_v2" if use_v2 else ""
+        plot_suffix = f"_{data_version}" if data_version != 'original' else ""
         print(f"📈 Plots saved to '/home/sagemaker-user/studio/src/new-rider-v3/plots/optimized_threshold_analysis_summary_decision_tree{plot_suffix}.pdf' and '.png'")
         print(f"📈 Separate plots created for each max_depth value: optimized_threshold_analysis_summary_decision_tree{plot_suffix}_max_depth_[3,5,10].pdf and .png")
     else:
-        data_version = "V2" if use_v2 else "original"
         print(f"No Decision Tree models found to analyze for {data_version} data.") 

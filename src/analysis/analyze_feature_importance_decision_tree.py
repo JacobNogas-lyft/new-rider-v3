@@ -20,25 +20,63 @@ def extract_decision_tree_feature_importance(model_path):
         print(f"Error loading model {model_path}: {e}")
         return None, None
 
-def analyze_decision_tree_feature_importance():
-    """Analyze feature importance across all saved decision tree models (all_features only)."""
+def analyze_decision_tree_feature_importance(data_version='v3'):
+    """Analyze feature importance across all saved decision tree models (all_features only, max_depth=10)."""
+    # Determine the base path based on data_version
+    data_suffix = f"_{data_version}" if data_version != 'original' else ""
+    base_models_path = f'../models/decision_tree/all_features{data_suffix}'
+    
+    print(f"Analyzing feature importance from models in: {base_models_path}")
+    print(f"Data version: {data_version.upper()}")
+    print(f"Using only max_depth=10 models")
+    
+    # Check if directory exists
+    if not os.path.exists(base_models_path):
+        print(f"ERROR: Directory {base_models_path} does not exist!")
+        return None
+    
     all_results = []
-    for root, _, files in os.walk('../models/decision_tree'):
+    for root, _, files in os.walk(base_models_path):
         for file in files:
             if file != 'decision_tree_model.joblib':
                 continue
             model_path = Path(os.path.join(root, file))
             path_parts = model_path.parts
-            if 'all_features' not in path_parts:
+            
+            # Only include models in all_features directory (with or without _v2/_v3 suffix)
+            all_features_found = False
+            for part in path_parts:
+                if 'all_features' in part:
+                    all_features_found = True
+                    break
+            
+            if not all_features_found:
                 continue
+            
+            # Only include max_depth 10 models
+            max_depth_found = False
+            for part in path_parts:
+                if part.startswith('max_depth_'):
+                    depth_value = part.replace('max_depth_', '')
+                    if depth_value == '10':
+                        max_depth_found = True
+                        break
+            
+            if not max_depth_found:
+                continue
+                
             segment = None
             mode = None
+            depth = None
             for part in path_parts:
                 if part.startswith('segment_'):
                     segment = part.replace('segment_', '')
                 elif part.startswith('mode_'):
                     mode = part.replace('mode_', '')
-            if not all([segment, mode]):
+                elif part.startswith('max_depth_'):
+                    depth = part.replace('max_depth_', '')
+            
+            if not all([segment, mode, depth]):
                 continue
             feature_names, importances = extract_decision_tree_feature_importance(model_path)
             if feature_names is not None and importances is not None:
@@ -46,7 +84,9 @@ def analyze_decision_tree_feature_importance():
                     'feature': feature_names,
                     'importance': importances,
                     'segment': segment,
-                    'mode': mode
+                    'mode': mode,
+                    'max_depth': int(depth),
+                    'data_version': data_version.upper()
                 })
                 all_results.append(df)
     if not all_results:
@@ -54,15 +94,23 @@ def analyze_decision_tree_feature_importance():
         return None
     return pd.concat(all_results, ignore_index=True)
 
-def create_feature_importance_summary_decision_tree(df):
-    """Create separate feature importance plots for each segment."""
+def create_feature_importance_summary_decision_tree(df, data_version='v3'):
+    """Create separate feature importance plots for each segment.
+    
+    Note: Only uses models with max_depth=10 for consistency.
+    """
     if df is None:
         return
     
     plt.style.use('default')
     
-    # Create summary subdirectory
-    Path('../plots/summary').mkdir(exist_ok=True)
+    # Create summary subdirectory with data version subfolder
+    summary_dir = Path(f'../plots/summary/{data_version}')
+    summary_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Get data version for file naming
+    data_suffix = f"_{data_version}" if data_version != 'original' else ""
+    data_version_title = data_version.upper()
     
     # Create separate plots for each segment
     for segment in df['segment'].unique():
@@ -102,7 +150,7 @@ def create_feature_importance_summary_decision_tree(df):
                        f'{importance:.3f}', ha='left', va='center', fontsize=9, fontweight='bold')
             
             ax.set_xlabel('Feature Importance', fontsize=12)
-            ax.set_title(f'{mode.upper()} Mode\nDecision Tree Feature Importance - {segment.upper()} Segment', fontsize=13, fontweight='bold')
+            ax.set_title(f'{mode.upper()} Mode\nDecision Tree Feature Importance - {segment.upper()} Segment\n{data_version_title} Data', fontsize=13, fontweight='bold')
             ax.tick_params(axis='y', labelsize=10)
             ax.grid(axis='x', alpha=0.3)
             
@@ -117,11 +165,11 @@ def create_feature_importance_summary_decision_tree(df):
         plt.tight_layout()
         
         # Save segment-specific plot
-        segment_filename = f'decision_tree_feature_importance_{segment}_segment.png'
-        plt.savefig(f'../plots/summary/{segment_filename}', dpi=300, bbox_inches='tight')
+        segment_filename = f'decision_tree_feature_importance_{segment}_segment{data_suffix}.png'
+        plt.savefig(summary_dir / segment_filename, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"📊 Saved {segment_filename}")
+        print(f"📊 Saved {segment_filename} to {summary_dir}")
     
     # Also create the original combined plot for reference
     pairs = list(df.groupby(['segment', 'mode']).groups.keys())
@@ -143,16 +191,23 @@ def create_feature_importance_summary_decision_tree(df):
         fig.delaxes(axes[j])
     
     plt.tight_layout()
-    plt.suptitle('Top 20 Decision Tree Feature Importances by Segment and Mode', fontsize=18, y=1.02)
-    plt.savefig('../plots/feature_importance_by_segment_mode_decision_tree.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('../plots/feature_importance_by_segment_mode_decision_tree.png', dpi=300, bbox_inches='tight')
+    plt.suptitle(f'Top 20 Decision Tree Feature Importances by Segment and Mode - {data_version_title} Data', fontsize=18, y=1.02)
+    plt.savefig(summary_dir / f'feature_importance_by_segment_mode_decision_tree{data_suffix}.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(summary_dir / f'feature_importance_by_segment_mode_decision_tree{data_suffix}.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    print("\n📊 Summary grid plot saved to '../plots/feature_importance_by_segment_mode_decision_tree.pdf' and '.png'")
-    print("📊 Segment-specific plots saved to '../plots/summary/decision_tree_feature_importance_<segment>_segment.png'")
+    print(f"\n📊 Summary grid plot saved to '{summary_dir}/feature_importance_by_segment_mode_decision_tree{data_suffix}.pdf' and '.png'")
+    print(f"📊 Segment-specific plots saved to '{summary_dir}/decision_tree_feature_importance_<segment>_segment{data_suffix}.png'")
 
 if __name__ == "__main__":
+    # Set data version: 'original', 'v2', or 'v3'
+    data_version = 'v3'
+    
     Path('../plots').mkdir(exist_ok=True)
-    df = analyze_decision_tree_feature_importance()
+    print(f"Starting Decision Tree feature importance analysis with {data_version.upper()} data...")
+    df = analyze_decision_tree_feature_importance(data_version)
     if df is not None:
-        create_feature_importance_summary_decision_tree(df) 
+        create_feature_importance_summary_decision_tree(df, data_version)
+        print(f"✅ Feature importance analysis complete for {data_version.upper()} data")
+    else:
+        print(f"❌ No models found for {data_version.upper()} data") 
