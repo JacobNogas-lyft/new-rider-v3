@@ -117,9 +117,19 @@ def create_threshold_table(df, total_sessions_all, total_riders_all, thresholds=
             distinct_riders = subset['rider_lyft_id'].nunique()
             sessions_pct = (total_sessions / total_sessions_all) * 100
             riders_pct = (distinct_riders / total_riders_all) * 100
+            # Format threshold display based on column type
+            if equality:
+                threshold_display = f"{threshold}"
+            elif value_column == 'years_since_signup':
+                threshold_display = f"{threshold:.2f}"
+            elif value_column == 'haversine_dist_km':
+                threshold_display = f"{threshold:.1f} km"
+            else:
+                threshold_display = f"{threshold*100:.0f}%"
+            
             results.append({
                 'threshold': threshold,
-                'threshold_pct': f"{threshold}" if equality else (f"{threshold:.2f}" if value_column == 'years_since_signup' else f"{threshold*100:.0f}%"),
+                'threshold_pct': threshold_display,
                 'total_sessions': total_sessions,
                 'sessions_pct': f"{sessions_pct:.1f}%",
                 'distinct_riders': distinct_riders,
@@ -227,6 +237,47 @@ def main(segment_type_list=['all'], data_version='v2'):
             print(f"Saved threshold-style table for years_since_signup thresholds to: {reports_dir / f'threshold_by_years_since_signup.csv'}")
         else:
             print("Column 'days_since_signup' not found in data for this segment. Skipping threshold table for days_since_signup.")
+
+        # Haversine distance threshold table: haversine_dist_meters_bw_dest_and_top_geohash6 > t
+        if 'haversine_dist_meters_bw_dest_and_top_geohash6' in df_segment.columns:
+            print("\n=== Threshold-style table for haversine_dist_meters_bw_dest_and_top_geohash6 > t ===")
+            # Convert meters to kilometers for better readability
+            df_segment['haversine_dist_km'] = df_segment['haversine_dist_meters_bw_dest_and_top_geohash6'] / 1000
+            
+            # Create thresholds based on data distribution
+            dist_data = df_segment['haversine_dist_km'].dropna()
+            if len(dist_data) > 0:
+                max_dist = dist_data.max()
+                min_dist = dist_data.min()
+                
+                # Create thresholds: 0, 1, 2, 5, 10, 15, 20, 25, 30, 40, 50km, then percentiles for higher values
+                base_thresholds = [0, 1, 2, 5, 10, 15, 20, 25, 30, 40, 50]
+                
+                # Add percentile-based thresholds for higher distances
+                if max_dist > 50:
+                    percentiles = [75, 80, 85, 90, 95, 99]
+                    percentile_thresholds = [np.percentile(dist_data, p) for p in percentiles]
+                    thresholds = base_thresholds + percentile_thresholds
+                else:
+                    thresholds = base_thresholds
+                
+                # Filter thresholds to be within data range and remove duplicates
+                thresholds = sorted(set([t for t in thresholds if t <= max_dist]))
+                
+                threshold_df = create_threshold_table(
+                    df_segment,
+                    thresholds=thresholds,
+                    value_column='haversine_dist_km',
+                    total_sessions_all=total_sessions_all,
+                    total_riders_all=total_riders_all
+                )
+                threshold_df.to_csv(reports_dir / f'threshold_by_haversine_dist_km.csv', index=False)
+                print(f"Saved threshold-style table for haversine distance thresholds to: {reports_dir / f'threshold_by_haversine_dist_km.csv'}")
+                print(f"Distance range: {min_dist:.2f} - {max_dist:.2f} km")
+            else:
+                print("No valid distance data found in this segment.")
+        else:
+            print("Column 'haversine_dist_meters_bw_dest_and_top_geohash6' not found in data for this segment. Skipping distance threshold table.")
 
         # --- Plus rate by signup_year, airline_destination, airline_pickup using create_threshold_table ---
         for feature in ['signup_year', 'airline_destination', 'airline_pickup']:
