@@ -14,7 +14,7 @@ sns.set_palette("husl")
 
 def load_csv_files(base_path):
     """
-    Load all CSV files from the feature_threshold_analysis folder structure.
+    Load all CSV files from the curbside_pickup_threshold_analysis folder structure.
     Returns a dictionary with segment names as keys and lists of (filename, dataframe) tuples as values.
     """
     base_path = Path(base_path)
@@ -45,18 +45,18 @@ def extract_feature_name(filename):
     Examples:
     - 'threshold_by_percent_rides_plus_lifetime' -> 'percent_rides_plus_lifetime'
     - 'threshold_by_airline_pickup' -> 'airline_pickup'
-    - 'request_rates_by_rides_plus_lifetime_exact' -> 'rides_plus_lifetime_exact'
+    - 'descriptive_stats_lux_pin_eta_diff_minutes' -> 'lux_pin_eta_diff_minutes'
     """
     if 'threshold_by_' in filename:
         return filename.split('threshold_by_')[1]
-    elif 'request_rates_by_' in filename:
-        return filename.split('request_rates_by_')[1]
+    elif 'descriptive_stats_' in filename:
+        return filename.split('descriptive_stats_')[1]
     else:
         return filename
 
 def is_categorical_feature(feature_name):
     # Only treat these as categorical for bar charts
-    categorical_features = ['airline_destination', 'airline_pickup', 'rides_plus_lifetime_exact']
+    categorical_features = ['airline_destination', 'airline_pickup', 'signup_year']
     return feature_name in categorical_features
 
 def calculate_r2(x, y):
@@ -72,23 +72,7 @@ def calculate_r2(x, y):
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
     return r2
 
-def format_xtick_labels_with_riders_pct(x_labels, riders_pct):
-    # x_labels: list/array of x values (categories or thresholds)
-    # riders_pct: list/array of percentages (as strings or floats)
-    formatted = []
-    for label, pct in zip(x_labels, riders_pct):
-        # Try to extract numeric value from pct if it's a string with %
-        if isinstance(pct, str) and '%' in pct:
-            pct_val = pct.strip()
-        else:
-            try:
-                pct_val = f"{float(pct):.1f}%"
-            except:
-                pct_val = str(pct)
-        formatted.append(f"{label}\n({pct_val})")
-    return formatted
-
-def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis'):
+def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/src/new-rider-v3/plots/curbside_pickup_threshold_analysis'):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -103,9 +87,13 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
     for segment_name, files_data in segments_data.items():
         print(f"\nCreating visualization for segment: {segment_name}")
         
-        # Filter valid files for plotting
+        # Filter valid files for plotting (exclude descriptive stats files)
         valid_files = []
         for filename, df in files_data:
+            # Skip descriptive statistics files
+            if 'descriptive_stats_' in filename:
+                continue
+                
             feature_name = extract_feature_name(filename)
             if feature_name == 'years_since_signup':
                 continue
@@ -116,6 +104,7 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
             if segment_name not in ['airport_pickup', 'airport_dropoff'] and feature_name in ['airline_pickup', 'airline_destination']:
                 continue
             valid_files.append((filename, df))
+        
         n_files = len(valid_files)
         n_cols = 1
         n_rows = n_files
@@ -130,6 +119,7 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
         for idx, (filename, df) in enumerate(valid_files):
             ax = axes[idx]
             feature_name = extract_feature_name(filename)
+            
             # Remove years_since_signup from all plots
             if feature_name == 'years_since_signup':
                 fig.delaxes(ax)
@@ -157,9 +147,6 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
                 potential_x_cols = [col for col in df.columns if col not in ride_type_columns + ['total_sessions', 'sessions_pct', 'distinct_riders', 'riders_pct', 'plus_sessions', 'standard_saver_sessions']]
                 x_col = potential_x_cols[0] if potential_x_cols else df.columns[0]
                 x_label = x_col.replace('_', ' ').title()
-            
-            # if feature_name == 'percent_rides_plus_lifetime':
-            #     x_label = '% Lifetime XL Rides > x'
 
             # Use bar chart only for known categorical features
             if is_categorical_feature(feature_name):
@@ -177,7 +164,7 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
                             ax.bar(x + i*bar_width, values, width=bar_width, label=label, color=color, align='center')
                             n_bars += 1
                 if n_bars > 0:
-                    # Set x-tick labels to just the threshold/category values (no riders_pct)
+                    # Set x-tick labels to just the threshold/category values
                     if is_categorical_feature(feature_name) or df[x_col].dtype == 'object':
                         xvals = np.arange(len(df[x_col]))
                         ax.set_xticks(xvals)
@@ -210,7 +197,8 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
                                 ax.annotate(text_val, (x, y), 
                                           xytext=(0, 5), textcoords='offset points',
                                           ha='center', va='bottom', fontsize=8, color=color)
-                # Set x-tick labels to just the threshold/category values (no riders_pct)
+                
+                # Set x-tick labels to just the threshold/category values
                 if is_categorical_feature(feature_name) or df[x_col].dtype == 'object':
                     xvals = np.arange(len(df[x_col]))
                     ax.set_xticks(xvals)
@@ -226,7 +214,7 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
             
             ax.set_xlabel(x_label)
             ax.set_ylabel('Request Rate (%)')
-            ax.set_title(f'{feature_name.replace("_", " ").title()}', fontsize=12, fontweight='bold')
+            ax.set_title(f'{feature_name.replace("_", " ").title()} - Curbside Pickup (LAX/ORD/SFO)', fontsize=12, fontweight='bold')
             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             ax.grid(True, alpha=0.3)
         
@@ -237,27 +225,29 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
         plt.subplots_adjust(right=0.85)  # Make room for legend
         
         # Save the plot
-        output_file = output_path / f'feature_threshold_analysis_{segment_name}.png'
+        output_file = output_path / f'curbside_pickup_threshold_analysis_{segment_name}.png'
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"Saved: {output_file}")
         plt.close()
 
-def create_summary_visualization(segments_data, output_dir='/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis'):
+def create_summary_visualization(segments_data, output_dir='/home/sagemaker-user/studio/src/new-rider-v3/plots/curbside_pickup_threshold_analysis'):
     """
     Create a summary visualization comparing segments for key features.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Find common features across segments
+    # Find common features across segments (excluding descriptive stats)
     common_features = set()
     for segment_name, files_data in segments_data.items():
         for filename, _ in files_data:
-            feature = extract_feature_name(filename)
-            common_features.add(feature)
+            if 'descriptive_stats_' not in filename:
+                feature = extract_feature_name(filename)
+                common_features.add(feature)
     
     # Focus on key features
-    key_features = ['percent_rides_plus_lifetime', 'rides_plus_lifetime_exact', 'years_since_signup', 'airline_destination', 'airline_pickup']
+    key_features = ['percent_rides_plus_lifetime', 'Percent_rides_premium_lifetime', 
+                   'lux_pin_eta_diff_wrt_standard_pin_eta_minutes', 'lux_final_price_diff_wrt_standard_major_currency']
     available_features = [f for f in key_features if f in common_features]
     
     if not available_features:
@@ -279,7 +269,7 @@ def create_summary_visualization(segments_data, output_dir='/home/sagemaker-user
             # Find the file for this feature
             feature_file = None
             for filename, df in files_data:
-                if extract_feature_name(filename) == feature:
+                if 'descriptive_stats_' not in filename and extract_feature_name(filename) == feature:
                     feature_file = (filename, df)
                     break
             
@@ -323,7 +313,7 @@ def create_summary_visualization(segments_data, output_dir='/home/sagemaker-user
         
         ax.set_xlabel(feature.replace('_', ' ').title())
         ax.set_ylabel('Plus Rate')
-        ax.set_title(f'Plus Rate by {feature.replace("_", " ").title()}', fontsize=12, fontweight='bold')
+        ax.set_title(f'Plus Rate by {feature.replace("_", " ").title()} - Curbside Pickup (LAX/ORD/SFO)', fontsize=12, fontweight='bold')
         ax.legend()
         ax.grid(True, alpha=0.3)
         
@@ -337,24 +327,28 @@ def create_summary_visualization(segments_data, output_dir='/home/sagemaker-user
     plt.tight_layout()
     
     # Save the summary plot
-    output_file = output_path / 'feature_threshold_analysis_summary.png'
+    output_file = output_path / 'curbside_pickup_threshold_analysis_summary.png'
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"Saved summary: {output_file}")
     plt.close()
 
-def create_riders_pct_bar_plots(segments_data, output_dir='/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis_riders_pct'):
-    from pathlib import Path
-    import matplotlib.pyplot as plt
-    import numpy as np
+def create_riders_pct_bar_plots(segments_data, output_dir='/home/sagemaker-user/studio/src/new-rider-v3/plots/curbside_pickup_threshold_analysis_riders_pct'):
+    """
+    Create bar plots showing the percentage of riders for each threshold.
+    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     x_col = 'threshold'
 
     for segment_name, files_data in segments_data.items():
-        # Filter valid files for plotting
+        # Filter valid files for plotting (exclude descriptive stats files)
         valid_files = []
         for filename, df in files_data:
+            # Skip descriptive statistics files
+            if 'descriptive_stats_' in filename:
+                continue
+                
             feature_name = extract_feature_name(filename)
             if feature_name == 'years_since_signup':
                 continue
@@ -367,6 +361,7 @@ def create_riders_pct_bar_plots(segments_data, output_dir='/home/sagemaker-user/
             if 'riders_pct' not in df.columns:
                 continue
             valid_files.append((filename, df))
+        
         n_files = len(valid_files)
         n_cols = 1
         n_rows = n_files
@@ -377,9 +372,11 @@ def create_riders_pct_bar_plots(segments_data, output_dir='/home/sagemaker-user/
             axes = [axes]
         else:
             axes = axes.flatten()
+        
         for idx, (filename, df) in enumerate(valid_files):
             ax = axes[idx]
             feature_name = extract_feature_name(filename)
+            
             # Remove years_since_signup from all plots
             if feature_name == 'years_since_signup':
                 ax.set_visible(False)
@@ -397,42 +394,163 @@ def create_riders_pct_bar_plots(segments_data, output_dir='/home/sagemaker-user/
             if 'riders_pct' not in df.columns:
                 ax.set_visible(False)
                 continue
+            
             yvals = df['riders_pct']
             # Convert to float if needed, then to percent
             if yvals.dtype == 'object':
                 yvals = yvals.str.rstrip('%').astype(float)
             else:
                 yvals = yvals.astype(float)
-            # If values are in 0-1, convert to 0-100
-            # if yvals.max() <= 1.0:
-            #     yvals = yvals * 100
+            
             # Always use index for bar chart xvals
             xvals = np.arange(len(df[x_col]))
             xlabels = [str(x) for x in df[x_col]]
             ax.set_xticks(xvals)
             ax.set_xticklabels(xlabels, rotation=45, ha='right')
             bars = ax.bar(xvals, yvals, color='tab:blue', alpha=0.8)
+            
             # Add text values above bars as percent
             for bar, val in zip(bars, yvals):
                 ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f'{val:.1f}%',
                         ha='center', va='bottom', fontsize=9, color='black', rotation=0)
+            
             # Set x-axis label to the feature name, not 'threshold'
             ax.set_xlabel(feature_name.replace('_', ' ').title())
-            ax.set_ylabel('% of New Riders')
-            ax.set_title(f'% of New Riders vs {feature_name.replace("_", " ").title()}', fontsize=12, fontweight='bold')
+            ax.set_ylabel('% of All Riders')
+            ax.set_title(f'% of All Riders vs {feature_name.replace("_", " ").title()}', fontsize=12, fontweight='bold')
             ax.grid(True, alpha=0.3, axis='y')
+        
         plt.tight_layout()
-        plt.savefig(output_path / f'riders_pct_{segment_name}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(output_path / f'curbside_pickup_riders_pct_{segment_name}.png', dpi=300, bbox_inches='tight')
         plt.close()
+
+def create_descriptive_stats_visualization(segments_data, output_dir='/home/sagemaker-user/studio/src/new-rider-v3/plots/curbside_pickup_threshold_analysis'):
+    """
+    Create visualizations for descriptive statistics of lux features.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Features to visualize stats for
+    lux_features = ['lux_pin_eta_diff_minutes', 'lux_final_price_diff_currency']
+    
+    for segment_name, files_data in segments_data.items():
+        stats_files = []
+        special_stats_file = None
+        
+        for filename, df in files_data:
+            if 'descriptive_stats_' in filename:
+                feature_name = extract_feature_name(filename)
+                if any(lux_feat in feature_name for lux_feat in lux_features):
+                    stats_files.append((filename, df, feature_name))
+            elif 'special_rider_statistics' in filename:
+                special_stats_file = (filename, df)
+        
+        if not stats_files:
+            continue
+        
+        # Create subplot layout: descriptive stats + special rider statistic
+        n_subplots = len(stats_files) + (1 if special_stats_file else 0)
+        fig, axes = plt.subplots(n_subplots, 1, figsize=(10, 6*n_subplots))
+        if n_subplots == 1:
+            axes = [axes]
+        
+        # Plot descriptive statistics
+        for idx, (filename, df, feature_name) in enumerate(stats_files):
+            ax = axes[idx]
+            
+            # Extract key statistics for plotting
+            stats_to_plot = ['mean', 'median', 'std', 'q25', 'q75', 'q90', 'q95']
+            values = []
+            labels = []
+            
+            for stat in stats_to_plot:
+                if stat in df.columns:
+                    values.append(df[stat].iloc[0])
+                    labels.append(stat.upper())
+            
+            if values:
+                bars = ax.bar(labels, values, color='skyblue', alpha=0.8)
+                
+                # Add value labels on bars
+                for bar, val in zip(bars, values):
+                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f'{val:.2f}',
+                            ha='center', va='bottom', fontsize=10, color='black')
+                
+                ax.set_title(f'Descriptive Statistics: {feature_name.replace("_", " ").title()}', 
+                           fontsize=12, fontweight='bold')
+                ax.set_ylabel('Value')
+                ax.grid(True, alpha=0.3, axis='y')
+                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        
+        # Plot special rider statistic if available
+        if special_stats_file:
+            ax = axes[-1]
+            filename, df = special_stats_file
+            
+            if 'value' in df.columns and len(df) > 0:
+                # Define metric labels and colors (includes both old and new metric names for compatibility)
+                metric_labels = {
+                    # New SFO-inclusive metric names
+                    'pct_riders_lax_ord_sfo': 'LAX/ORD/SFO\nSessions\n(% of all riders)',
+                    'pct_sessions_lax_ord_sfo': 'LAX/ORD/SFO\nSessions\n(% of all sessions)',
+                    'pct_lax_ord_sfo_riders_with_black_atf': 'Black ATF\n(% of LAX/ORD/SFO\nriders)',
+                    'pct_riders_lax_ord_sfo_and_lux_price_lte_44': 'LAX/ORD/SFO +\nLux ≤ $44\n(% of all riders)',
+                    'pct_sessions_lax_ord_sfo_and_lux_price_lte_44': 'LAX/ORD/SFO +\nLux ≤ $44\n(% of all sessions)',
+                    # Old LAX/ORD-only metric names for backward compatibility
+                    'pct_riders_lax_ord': 'LAX/ORD\nSessions\n(% of all riders)',
+                    'pct_sessions_lax_ord': 'LAX/ORD\nSessions\n(% of all sessions)',
+                    'pct_lax_ord_riders_with_black_atf': 'Black ATF\n(% of LAX/ORD\nriders)',
+                    'pct_riders_lax_ord_and_lux_price_lte_44': 'LAX/ORD +\nLux ≤ $44\n(% of all riders)',
+                    'pct_sessions_lax_ord_and_lux_price_lte_44': 'LAX/ORD +\nLux ≤ $44\n(% of all sessions)',
+                    # Common metric
+                    'pct_sessions_black_atf': 'Black ATF\n(% of all\nsessions)'
+                }
+                colors = ['skyblue', 'lightsteelblue', 'lightgreen', 'orange', 'mediumorchid', 'coral']
+                
+                # Extract values for each metric
+                values = []
+                labels = []
+                bar_colors = []
+                
+                for idx, (_, row) in enumerate(df.iterrows()):
+                    metric = row['metric']
+                    value = row['value']
+                    if metric in metric_labels:
+                        values.append(value)
+                        labels.append(metric_labels[metric])
+                        bar_colors.append(colors[idx % len(colors)])
+                
+                if values:
+                    # Create bars for all special statistics
+                    bars = ax.bar(labels, values, color=bar_colors, alpha=0.8)
+                    
+                    # Add value labels on bars
+                    for bar, val in zip(bars, values):
+                        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f'{val:.2f}%',
+                                ha='center', va='bottom', fontsize=10, color='black', fontweight='bold')
+                    
+                    ax.set_title('LAX/ORD/SFO Summary', fontsize=12, fontweight='bold')
+                    ax.set_ylabel('Percentage (%)')
+                    ax.grid(True, alpha=0.3, axis='y')
+                    # Set y-axis limit based on maximum value
+                    max_val = max(values) if values else 1.0
+                    ax.set_ylim(0, max(max_val * 1.2, 1.0))
+                    plt.setp(ax.get_xticklabels(), rotation=0, ha='center')
+        
+        plt.tight_layout()
+        plt.savefig(output_path / f'curbside_pickup_descriptive_stats_{segment_name}.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved descriptive stats visualization for {segment_name}")
 
 def main():
     """
-    Main function to run the visualization.
+    Main function to run the curbside pickup visualization (LAX/ORD/SFO).
     """
-    print("Loading feature threshold analysis data...")
+    print("Loading curbside pickup threshold analysis data (LAX/ORD/SFO)...")
     
-    # Load data from the reports directory - use absolute path
-    base_path = "/home/sagemaker-user/studio/src/new-rider-v3/reports/feature_threshold_analysis"
+    # Load data from the curbside pickup reports directory
+    base_path = "/home/sagemaker-user/studio/src/new-rider-v3/reports/curbside_pickup_threshold_analysis"
     print(f"Looking for data in: {base_path}")
     
     # Check if directory exists
@@ -449,7 +567,7 @@ def main():
     segments_data = load_csv_files(base_path)
     
     if not segments_data:
-        print("No data found. Please check the path: reports/feature_threshold_analysis")
+        print("No data found. Please check the path: reports/curbside_pickup_threshold_analysis")
         return
     
     print(f"\nFound {len(segments_data)} segments:")
@@ -457,12 +575,16 @@ def main():
         print(f"  - {segment_name}: {len(files_data)} files")
     
     # Create visualizations
-    print("\nCreating visualizations...")
+    print("\nCreating curbside pickup visualizations...")
     create_visualization(segments_data)
     create_summary_visualization(segments_data)
     create_riders_pct_bar_plots(segments_data)
+    create_descriptive_stats_visualization(segments_data)
     
-    print("\nVisualization complete! Check the '/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis' and 'plots/feature_threshold_analysis_riders_pct' directories.")
+    print("\nCurbside pickup visualization complete (LAX/ORD/SFO)!")
+    print("Check the following directories:")
+    print("  - plots/curbside_pickup_threshold_analysis/")
+    print("  - plots/curbside_pickup_threshold_analysis_riders_pct/")
 
 if __name__ == "__main__":
     main() 
