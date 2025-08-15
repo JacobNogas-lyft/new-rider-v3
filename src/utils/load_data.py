@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 S3_BASE_PATH_ORIGINAL = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_f25b3c89-a634-421a-90fe-dc1df09a0098'
 S3_BASE_PATH_V2 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v2_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_5dbd8727-c741-4645-a236-a7d702587ea1'
 #S3_BASE_PATH_V3 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v3_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_728c89c7-1fc8-46c2-aa4b-f9f08ce9a384'
-S3_BASE_PATH_V3 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v3_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_19f1b346-bb03-4761-8eee-b9d09a88e843'
+#S3_BASE_PATH_V3 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v3_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_19f1b346-bb03-4761-8eee-b9d09a88e843'
+S3_BASE_PATH_V3 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v3_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_61213c65-d78d-4fd5-840d-dc7da991b098'
+S3_BASE_PATH_V4 = 's3://lyft-fugue-cache/expire/90d/datagen/0.0.2/new_rider_features_v4_offeringsmxmodels_relevance_ranking_model_2025-04-22_2025-05-22_95a9c5c7-bb41-4870-b646-1d0f48b50efa'
 
 EXTRACT_PATH = f"{S3_BASE_PATH_ORIGINAL}/extract"
 
@@ -83,11 +85,17 @@ def safe_read_parquet(pq_file, filesystem):
         raise
 
 def get_s3_base_path(data_version='original'):
-    """Get the appropriate S3 base path based on data version."""
+    """Get the appropriate S3 base path based on data version.
+    
+    Args:
+        data_version (str): Data version to load. Options: 'original', 'v2', 'v3', 'v4'
+    """
     if data_version == 'v2':
         return S3_BASE_PATH_V2
     elif data_version == 'v3':
         return S3_BASE_PATH_V3
+    elif data_version == 'v4':
+        return S3_BASE_PATH_V4
     else:
         return S3_BASE_PATH_ORIGINAL
 
@@ -95,7 +103,7 @@ def load_parquet_data(data_version='original'):
     """Load and combine Parquet files from S3.
     
     Args:
-        data_version (str): Data version to load. Options: 'original', 'v2', 'v3'
+        data_version (str): Data version to load. Options: 'original', 'v2', 'v3', 'v4'
     """
     # Choose the appropriate S3 base path
     s3_base_path = get_s3_base_path(data_version)

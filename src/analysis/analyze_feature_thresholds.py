@@ -103,15 +103,14 @@ def calculate_premium_percentage(df):
     return df
 
 def create_plus_target(df):
-    """Create binary target for Plus requests."""
-    # Filter out sessions where Plus was preselected
-    df = df[df['preselected_mode'] != 'plus'].copy()
-    
-    df['chose_plus'] = (df['requested_ride_type'] == 'plus').astype(int)
+    """Create binary target for Plus requests when it was NOT preselected."""
+    # Keep all sessions - don't filter out preselected sessions
+    # But only count Plus choices when Plus was NOT preselected
+    df['chose_plus'] = ((df['requested_ride_type'] == 'plus') & (df['preselected_mode'] != 'plus')).astype(int)
     return df
 
 def create_threshold_table(df, total_sessions_all, total_riders_all, thresholds=None, value_column='percent_rides_plus_lifetime', equality=False):
-    """Create a table showing probability of choosing Plus, standard_saver, premium, and lux for sessions where value_column > threshold (or == threshold if equality=True)."""
+    """Create a table showing probability of choosing each ride type when it was NOT preselected, for sessions where value_column > threshold (or == threshold if equality=True)."""
     # Default thresholds for percent_rides_plus_lifetime
     if thresholds is None:
         thresholds = [-0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
@@ -123,17 +122,28 @@ def create_threshold_table(df, total_sessions_all, total_riders_all, thresholds=
             mask = df[value_column] > threshold
         subset = df[mask]
         if len(subset) > 0:
+            # Calculate rates where users chose each mode when it was NOT preselected
             plus_rate = subset['chose_plus'].mean()
             plus_sessions = subset['chose_plus'].sum()
-            standard_saver_rate = (subset['requested_ride_type'] == 'standard_saver').mean()
-            standard_saver_sessions = (subset['requested_ride_type'] == 'standard_saver').sum()
-            premium_rate = (subset['requested_ride_type'] == 'premium').mean()
-            lux_rate = (subset['requested_ride_type'] == 'lux').mean()
-            fastpass_rate = (subset['requested_ride_type'] == 'fastpass').mean()
+            standard_saver_rate = ((subset['requested_ride_type'] == 'standard_saver') & (subset['preselected_mode'] != 'standard_saver')).mean()
+            standard_saver_sessions = ((subset['requested_ride_type'] == 'standard_saver') & (subset['preselected_mode'] != 'standard_saver')).sum()
+            premium_rate = ((subset['requested_ride_type'] == 'premium') & (subset['preselected_mode'] != 'premium')).mean()
+            lux_rate = ((subset['requested_ride_type'] == 'lux') & (subset['preselected_mode'] != 'lux')).mean()
+            fastpass_rate = ((subset['requested_ride_type'] == 'fastpass') & (subset['preselected_mode'] != 'fastpass')).mean()
+            
+            # Calculate rate where requested_ride_type matches preselected_mode
+            chose_preselected_rate = (subset['requested_ride_type'] == subset['preselected_mode']).mean()
+            
             total_sessions = len(subset)
-            distinct_riders = subset['rider_lyft_id'].nunique()
+            no_dominant_mode_mask = (subset['preselected_mode'] == 'standard') | (subset['preselected_mode'] == 'fastpass')
+            distinct_riders_no_dominant_mode = subset['rider_lyft_id'][no_dominant_mode_mask].nunique()
+            distinct_riders = distinct_riders_no_dominant_mode
+            #distinct_riders = subset['rider_lyft_id'].nunique()
+
             sessions_pct = (total_sessions / total_sessions_all) * 100
             riders_pct = (distinct_riders / total_riders_all) * 100
+            #riders_pct = (distinct_riders / total_riders_all) * 100 #exclude dominant mode preslection
+            #subset['preselected_mode'] == 'standard' or subset['preselected_mode'] == 'plus'
             # Format threshold display based on column type
             if equality:
                 threshold_display = f"{threshold}"
@@ -163,7 +173,9 @@ def create_threshold_table(df, total_sessions_all, total_riders_all, thresholds=
                 'standard_saver_probability_pct': f"{standard_saver_rate*100:.1f}%",
                 'premium_rate': premium_rate,
                 'lux_rate': lux_rate,
-                'fastpass_rate': fastpass_rate
+                'fastpass_rate': fastpass_rate,
+                'chose_preselected_rate': chose_preselected_rate,
+                'chose_preselected_rate_pct': f"{chose_preselected_rate*100:.1f}%"
             })
     threshold_df = pd.DataFrame(results)
     return threshold_df
@@ -178,6 +190,12 @@ def main(segment_type_list=['all'], data_version='v2'):
     print("Loading data...")
     df = load_parquet_data(data_version)
     df = add_churned_indicator(df)
+    premium_cnt_raw = df['rides_premium_lifetime'].sum()
+    df['rides_premium_lifetime'] = df['rides_premium_lifetime'] - df['rides_premium_lifetime_pre_nov_2023']
+
+    assert df['rides_premium_lifetime'].min() >= 0, "Rides premium lifetime should be non-negative"
+    assert df['rides_premium_lifetime'].sum() != premium_cnt_raw, "Rides premium lifetime should be different from raw premium cnt"
+
     # Calculate totals for the whole dataset (for normalization)
     print("Calculating whole dataset totals for normalization...")
     df_whole = filter_by_segment(df, 'all')
@@ -273,19 +291,40 @@ def main(segment_type_list=['all'], data_version='v2'):
                 max_dist = dist_data.max()
                 min_dist = dist_data.min()
                 
-                # Create thresholds: 0, 1, 2, 5, 10, 15, 20, 25, 30, 40, 50km, then percentiles for higher values
-                base_thresholds = [0, 1, 2, 5, 10, 15, 20, 25, 30, 40, 50]
+                # Create data-driven thresholds for better distribution
+                # Use percentiles for most of the range, but include some logical breakpoints
+                logical_thresholds = [0, 1, 2, 5, 10, 20]  # Common short distances
                 
-                # Add percentile-based thresholds for higher distances
-                if max_dist > 50:
-                    percentiles = [75, 80, 85, 90, 95, 99]
+                # Add percentile-based thresholds for better data distribution
+                # Cap at 95th percentile to avoid extreme outliers
+                percentile_95 = np.percentile(dist_data, 95)
+                
+                if percentile_95 > 20:
+                    # Create evenly spaced percentiles in the data-rich range
+                    percentiles = [25, 50, 75, 80, 85, 90, 95]
                     percentile_thresholds = [np.percentile(dist_data, p) for p in percentiles]
-                    thresholds = base_thresholds + percentile_thresholds
+                    
+                    # Combine logical and percentile thresholds
+                    all_thresholds = logical_thresholds + percentile_thresholds
                 else:
-                    thresholds = base_thresholds
+                    all_thresholds = logical_thresholds
                 
-                # Filter thresholds to be within data range and remove duplicates
-                thresholds = sorted(set([t for t in thresholds if t <= max_dist]))
+                # Remove duplicates, sort, and filter to reasonable range
+                thresholds = sorted(set([t for t in all_thresholds if t <= percentile_95]))
+                
+                # Round thresholds to cleaner values for better readability
+                rounded_thresholds = []
+                for t in thresholds:
+                    if t < 1:
+                        rounded_thresholds.append(round(t, 1))
+                    elif t < 10:
+                        rounded_thresholds.append(round(t, 0))
+                    elif t < 100:
+                        rounded_thresholds.append(round(t / 5) * 5)  # Round to nearest 5
+                    else:
+                        rounded_thresholds.append(round(t / 10) * 10)  # Round to nearest 10
+                
+                thresholds = sorted(set(rounded_thresholds))
                 
                 threshold_df = create_threshold_table(
                     df_segment,
@@ -333,6 +372,42 @@ def main(segment_type_list=['all'], data_version='v2'):
         )
         threshold_df.to_csv(reports_dir / f'threshold_by_Percent_rides_premium_lifetime.csv', index=False)
         print(f"Saved threshold-style table for Percent_rides_premium_lifetime to: {reports_dir / f'threshold_by_Percent_rides_premium_lifetime.csv'}")
+
+        # --- Cohort-specific analyses for Percent_rides_premium_lifetime ---
+        if 'signup_year' in df_segment.columns:
+            print(f"\n=== Cohort-specific Percent_rides_premium_lifetime analysis ===")
+            
+            # Cohort 1: signup_year <= 2020
+            cohort_2020 = df_segment[df_segment['signup_year'] <= 2020].copy()
+            if len(cohort_2020) >= 50:
+                print(f"  Processing cohort (signup <= 2020): {len(cohort_2020)} sessions")
+                cohort_2020_threshold_df = create_threshold_table(
+                    cohort_2020,
+                    value_column='Percent_rides_premium_lifetime',
+                    total_sessions_all=total_sessions_all,
+                    total_riders_all=total_riders_all
+                )
+                cohort_2020_threshold_df.to_csv(reports_dir / f'threshold_by_Percent_rides_premium_lifetime_signup_2020_cohort.csv', index=False)
+                print(f"  Saved signup ≤ 2020 cohort analysis")
+            else:
+                print(f"  Skipping signup ≤ 2020 cohort: only {len(cohort_2020)} sessions")
+            
+            # Cohort 2: signup_year <= 2021
+            cohort_2021 = df_segment[df_segment['signup_year'] <= 2021].copy()
+            if len(cohort_2021) >= 50:
+                print(f"  Processing cohort (signup <= 2021): {len(cohort_2021)} sessions")
+                cohort_2021_threshold_df = create_threshold_table(
+                    cohort_2021,
+                    value_column='Percent_rides_premium_lifetime',
+                    total_sessions_all=total_sessions_all,
+                    total_riders_all=total_riders_all
+                )
+                cohort_2021_threshold_df.to_csv(reports_dir / f'threshold_by_Percent_rides_premium_lifetime_signup_2021_cohort.csv', index=False)
+                print(f"  Saved signup ≤ 2021 cohort analysis")
+            else:
+                print(f"  Skipping signup ≤ 2021 cohort: only {len(cohort_2021)} sessions")
+        else:
+            print(f"  Skipping cohort analysis: 'signup_year' column not found")
 
         # --- Threshold-style table for lux_pin_eta_diff_wrt_standard_pin_eta_minutes ---
         if 'lux_pin_eta_diff_wrt_standard_pin_eta_minutes' in df_segment.columns:
@@ -449,5 +524,5 @@ if __name__ == "__main__":
     segment_type_list = ['airport', 'airport_dropoff', 'airport_pickup', 'all', 'churned']
     #segment_type_list = ['all']  # Uncomment to run only for all data
     # Set data version: 'original', 'v2', or 'v3'
-    data_version = 'v2'
+    data_version = 'v4'
     main(segment_type_list, data_version) 

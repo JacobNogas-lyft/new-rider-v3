@@ -93,12 +93,12 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Define the ride type columns and new labels
-    ride_type_columns = ['plus_probability', 'standard_saver_rate', 'premium_rate', 'lux_rate', 'fastpass_rate']
-    ride_type_labels = ['XL', 'WS', 'XC', 'Black', 'PP']
+    ride_type_columns = ['plus_probability', 'standard_saver_rate', 'premium_rate', 'lux_rate', 'fastpass_rate', 'chose_preselected_rate']
+    ride_type_labels = ['XL', 'WS', 'XC', 'Black', 'PP', 'Preselected']
     label_map = dict(zip(ride_type_columns, ride_type_labels))
     
     # Colors for each ride type
-    colors = ['#0072B2', '#E69F00', '#009E73', '#D55E00', '#000000']
+    colors = ['#0072B2', '#E69F00', '#009E73', '#D55E00', '#000000', '#CC79A7']
     
     for segment_name, files_data in segments_data.items():
         print(f"\nCreating visualization for segment: {segment_name}")
@@ -154,7 +154,7 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
                 x_col = 'threshold_pct'
                 x_label = 'Threshold (%)'
             else:
-                potential_x_cols = [col for col in df.columns if col not in ride_type_columns + ['total_sessions', 'sessions_pct', 'distinct_riders', 'riders_pct', 'plus_sessions', 'standard_saver_sessions']]
+                potential_x_cols = [col for col in df.columns if col not in ride_type_columns + ['total_sessions', 'sessions_pct', 'distinct_riders', 'riders_pct', 'plus_sessions', 'standard_saver_sessions', 'chose_preselected_rate_pct']]
                 x_col = potential_x_cols[0] if potential_x_cols else df.columns[0]
                 x_label = x_col.replace('_', ' ').title()
             
@@ -174,7 +174,18 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
                         else:
                             values = df[col].astype(float)
                         if values.notna().any() and values.sum() != 0:
-                            ax.bar(x + i*bar_width, values, width=bar_width, label=label, color=color, align='center')
+                            bars = ax.bar(x + i*bar_width, values, width=bar_width, label=label, color=color, align='center')
+                            
+                            # Add error bars specifically for preselected mode bars
+                            if col == 'chose_preselected_rate':
+                                # Create asymmetric error bars: [-value*0.23, +0]
+                                # Convert to same scale as values (0-1 range for bars)
+                                lower_errors = values * 0.22  # Negative error (will be subtracted)
+                                upper_errors = np.zeros_like(values)  # No positive error
+                                ax.errorbar(x + i*bar_width, values, yerr=[lower_errors, upper_errors], 
+                                           color=color, alpha=0.3, capsize=3, capthick=1, 
+                                           linestyle='none', marker='none')
+                            
                             n_bars += 1
                 if n_bars > 0:
                     # Set x-tick labels to just the threshold/category values (no riders_pct)
@@ -202,6 +213,15 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
                         r2 = calculate_r2(np.array(x_values, dtype=float), np.array(values, dtype=float))
                         line = ax.plot(x_values, values, label=f"{label} R² = {r2:.2f}", color=color, linewidth=2, marker='o', markersize=4)
                         
+                        # Add error bars specifically for preselected mode curves
+                        if col == 'chose_preselected_rate':
+                            # Create asymmetric error bars: [-value*0.23, +0]
+                            lower_errors = values * 0.22  # Negative error (will be subtracted)
+                            upper_errors = np.zeros_like(values)  # No positive error
+                            ax.errorbar(x_values, values, yerr=[lower_errors, upper_errors], 
+                                       color=color, alpha=0.3, capsize=3, capthick=1, 
+                                       linestyle='none', marker='none')
+                        
                         # Add text annotations for each data point
                         for x, y in zip(x_values, values):
                             if not np.isnan(x) and not np.isnan(y):
@@ -219,14 +239,43 @@ def create_visualization(segments_data, output_dir='/home/sagemaker-user/studio/
                 else:
                     xvals = np.array(df[x_col])
                     ax.set_xticks(xvals)
-                    ax.set_xticklabels([str(x) for x in xvals], rotation=45, ha='right')
+                    
+                    # Special formatting for haversine distance to reduce clutter
+                    if 'haversine' in feature_name.lower():
+                        # Format distance values more cleanly
+                        xlabels = []
+                        for x in xvals:
+                            if x < 1:
+                                xlabels.append(f"{x:.1f}")
+                            elif x < 10:
+                                xlabels.append(f"{x:.0f}")
+                            else:
+                                xlabels.append(f"{x:.0f}")
+                        ax.set_xticklabels(xlabels, rotation=45, ha='right')
+                        # Reduce number of ticks if too many
+                        if len(xvals) > 8:
+                            # Show every other tick
+                            tick_indices = range(0, len(xvals), 2)
+                            ax.set_xticks([xvals[i] for i in tick_indices])
+                            ax.set_xticklabels([xlabels[i] for i in tick_indices], rotation=45, ha='right')
+                    else:
+                        ax.set_xticklabels([str(x) for x in xvals], rotation=45, ha='right')
                     plt.subplots_adjust(bottom=0.2)
                 if 'x_values' in locals() and len(x_values) > 10:
                     ax.tick_params(axis='x', rotation=45)
             
             ax.set_xlabel(x_label)
             ax.set_ylabel('Request Rate (%)')
-            ax.set_title(f'{feature_name.replace("_", " ").title()}', fontsize=12, fontweight='bold')
+            
+            # Special handling for cohort files
+            if 'signup_2020_cohort' in feature_name:
+                title = 'Premium History (Signed up ≤ 2020)'
+            elif 'signup_2021_cohort' in feature_name:
+                title = 'Premium History (Signed up ≤ 2021)'
+            else:
+                title = f'{feature_name.replace("_", " ").title()}'
+            
+            ax.set_title(title, fontsize=12, fontweight='bold')
             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             ax.grid(True, alpha=0.3)
         
@@ -268,9 +317,9 @@ def create_summary_visualization(segments_data, output_dir='/home/sagemaker-user
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     axes = axes.flatten()
     
-    ride_type_columns = ['plus_probability', 'standard_saver_rate', 'premium_rate', 'lux_rate', 'fastpass_rate']
-    ride_type_labels = ['XL', 'WS', 'XC', 'Black', 'PP']
-    colors = ['#0072B2', '#E69F00', '#009E73', '#D55E00', '#000000']
+    ride_type_columns = ['plus_probability', 'standard_saver_rate', 'premium_rate', 'lux_rate', 'fastpass_rate', 'chose_preselected_rate']
+    ride_type_labels = ['XL', 'WS', 'XC', 'Black', 'PP', 'Preselected']
+    colors = ['#0072B2', '#E69F00', '#009E73', '#D55E00', '#000000', '#CC79A7']
     
     for idx, feature in enumerate(available_features[:4]):  # Max 4 subplots
         ax = axes[idx]
@@ -294,7 +343,7 @@ def create_summary_visualization(segments_data, output_dir='/home/sagemaker-user
             elif 'threshold_pct' in df.columns:
                 x_col = 'threshold_pct'
             else:
-                potential_x_cols = [col for col in df.columns if col not in ride_type_columns + ['total_sessions', 'sessions_pct', 'distinct_riders', 'riders_pct', 'plus_sessions', 'standard_saver_sessions']]
+                potential_x_cols = [col for col in df.columns if col not in ride_type_columns + ['total_sessions', 'sessions_pct', 'distinct_riders', 'riders_pct', 'plus_sessions', 'standard_saver_sessions', 'chose_preselected_rate_pct']]
                 x_col = potential_x_cols[0] if potential_x_cols else df.columns[0]
             
             # Plot Plus rate for this segment
@@ -429,10 +478,11 @@ def main():
     """
     Main function to run the visualization.
     """
-    print("Loading feature threshold analysis data...")
+    data_version = 'v4'  # Set the data version here
+    print(f"Loading feature threshold analysis data for {data_version.upper()}...")
     
     # Load data from the reports directory - use absolute path
-    base_path = "/home/sagemaker-user/studio/src/new-rider-v3/reports/feature_threshold_analysis"
+    base_path = f"/home/sagemaker-user/studio/src/new-rider-v3/reports/feature_threshold_analysis/{data_version}"
     print(f"Looking for data in: {base_path}")
     
     # Check if directory exists
@@ -458,11 +508,11 @@ def main():
     
     # Create visualizations
     print("\nCreating visualizations...")
-    create_visualization(segments_data)
-    create_summary_visualization(segments_data)
-    create_riders_pct_bar_plots(segments_data)
+    create_visualization(segments_data, output_dir=f'/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis/{data_version}')
+    create_summary_visualization(segments_data, output_dir=f'/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis/{data_version}')
+    create_riders_pct_bar_plots(segments_data, output_dir=f'/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis_riders_pct/{data_version}')
     
-    print("\nVisualization complete! Check the '/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis' and 'plots/feature_threshold_analysis_riders_pct' directories.")
+    print(f"\nVisualization complete! Check the '/home/sagemaker-user/studio/src/new-rider-v3/plots/feature_threshold_analysis/{data_version}' and 'plots/feature_threshold_analysis_riders_pct/{data_version}' directories.")
 
 if __name__ == "__main__":
     main() 
