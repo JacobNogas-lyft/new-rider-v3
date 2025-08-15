@@ -94,8 +94,8 @@ def calculate_premium_percentage(df):
             df['rides_premium_lifetime'] / df['rides_lifetime'].replace(0, np.nan)
         ).fillna(0)
         
-        # Clip to 0-1 range (in case of data issues)
-        df['Percent_rides_premium_lifetime'] = df['Percent_rides_premium_lifetime'].clip(0, 1)
+        # Assert that Percent_rides_premium_lifetime is between 0 and 1
+        assert ((df['Percent_rides_premium_lifetime'] >= 0) & (df['Percent_rides_premium_lifetime'] <= 1)).all(), "Percent_rides_premium_lifetime values must be between 0 and 1"
     else:
         print("Warning: 'rides_premium_lifetime' column not found. Setting Percent_rides_premium_lifetime to 0.")
         df['Percent_rides_premium_lifetime'] = 0
@@ -209,6 +209,8 @@ def main(segment_type_list=['all'], data_version='v2'):
     total_sessions_all = len(df_whole)
     total_riders_all = df_whole['rider_lyft_id'].nunique()
     print(f"Whole dataset totals: {total_sessions_all:,} sessions, {total_riders_all:,} riders")
+
+  
     # Process each segment type
     for segment_type in segment_type_list:
         print(f"\n{'='*60}")
@@ -224,6 +226,24 @@ def main(segment_type_list=['all'], data_version='v2'):
         # Analyze relationship
         # Remove analyze_plus_vs_plus_percentage and all calls to it
         # For percent_rides_plus_lifetime, call create_threshold_table directly and save the result
+
+          # Calculate percent of riders with both percent_rides_plus_lifetime > 5% and percent_rides_premium_lifetime > 10%
+
+        both_criteria = (
+            (df_segment['percent_rides_plus_lifetime'] > 0.05) &
+            (df_segment['Percent_rides_premium_lifetime'] > 0.10)
+        )
+        num_both = df_segment[both_criteria].rider_lyft_id.nunique()
+        pct_both = num_both / total_riders_all * 100
+        num_trigger_plus = df_segment[df_segment['percent_rides_plus_lifetime'] > 0.05].rider_lyft_id.nunique()
+        pct_of_trigger_plus_trigger_premium = num_both / num_trigger_plus * 100
+
+
+        print(segment_type)
+        print(f"Riders with >5% Plus AND >10% Premium rides: {num_both:,} ({pct_both:.2f}%)")
+        print(f"Riders with >5% Plus AND >10% Premium rides: {num_both:,} ({pct_both:.2f}%)")
+        #print(f"% of Riders with >5% Plus also >10% Premium: {num_trigger_plus * 100:.2f}%")
+        print(f"% of Riders with >5% Plus also >10% Premium: {pct_of_trigger_plus_trigger_premium}")
 
         # Create segment-specific output directories
         base_path = Path('/home/sagemaker-user/studio/src/new-rider-v3')
